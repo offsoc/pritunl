@@ -1044,6 +1044,15 @@ CIPHERS = {
     'aes256': 'cipher AES-256-CBC\ndata-ciphers AES-256-GCM:AES-256-CBC',
     'chacha20poly1205': 'cipher CHACHA20-POLY1305\ndata-ciphers CHACHA20-POLY1305',
 }
+CIPHERS_DCO = {
+    'none': 'cipher none',
+    'bf128': 'cipher AES-128-GCM\ndata-ciphers AES-128-GCM',
+    'bf256': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
+    'aes128': 'cipher AES-128-GCM\ndata-ciphers AES-128-GCM',
+    'aes192': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
+    'aes256': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
+    'chacha20poly1205': 'cipher CHACHA20-POLY1305\ndata-ciphers CHACHA20-POLY1305',
+}
 
 SERVER_CIPHERS_OLD = {
     'none': 'cipher none',
@@ -1062,6 +1071,15 @@ SERVER_CIPHERS = {
     'aes192': 'cipher AES-256-CBC\nncp-ciphers AES-256-GCM:AES-256-CBC',
     'aes256': 'cipher AES-256-CBC\nncp-ciphers AES-256-GCM:AES-256-CBC',
     'chacha20poly1205': 'cipher CHACHA20-POLY1305\nncp-ciphers CHACHA20-POLY1305',
+}
+SERVER_CIPHERS_DCO = {
+    'none': 'cipher none\nncp-disable',
+    'bf128': 'cipher AES-128-GCM',
+    'bf256': 'cipher AES-256-GCM',
+    'aes128': 'cipher AES-128-GCM',
+    'aes192': 'cipher AES-256-GCM',
+    'aes256': 'cipher AES-256-GCM',
+    'chacha20poly1205': 'cipher CHACHA20-POLY1305',
 }
 
 HASHES = {

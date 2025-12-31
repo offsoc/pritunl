@@ -439,7 +439,10 @@ class ServerInstance(object):
             raise ValueError('Unknown protocol')
 
         if utils.check_openvpn_ver():
-            server_ciphers = SERVER_CIPHERS
+            if self.server.ovpn_dco:
+                server_ciphers = SERVER_CIPHERS_DCO
+            else:
+                server_ciphers = SERVER_CIPHERS
             server_conf_template = OVPN_INLINE_SERVER_CONF
         else:
             server_ciphers = SERVER_CIPHERS_OLD
@@ -528,7 +531,8 @@ class ServerInstance(object):
         else:
             server_conf += 'ignore-unknown-option allow-compression\n'
             server_conf += 'allow-compression no\n'
-            server_conf += 'comp-lzo no\npush "comp-lzo no"\n'
+            if not self.server.ovpn_dco:
+                server_conf += 'comp-lzo no\npush "comp-lzo no"\n'
 
         if push:
             server_conf += push
@@ -1750,6 +1754,7 @@ class ServerInstance(object):
             route_count=len(self.server.routes),
             network=self.server.network,
             network6=self.server.network6,
+            ovpn_dco=self.server.ovpn_dco,
             dynamic_firewall=self.server.dynamic_firewall,
             bypass_sso_auth=self.server.bypass_sso_auth,
             geo_sort=self.server.geo_sort,
@@ -1818,6 +1823,16 @@ class ServerInstance(object):
 
             if self.is_interrupted():
                 return
+
+            if self.server.ovpn_dco:
+                self.state = 'ovpn_dco'
+                try:
+                    utils.check_output_logged([
+                        'modprobe',
+                        'ovpn-dco-v2',
+                    ])
+                except:
+                    pass
 
             self.state = 'bridge_start'
             if self.server.debug:
