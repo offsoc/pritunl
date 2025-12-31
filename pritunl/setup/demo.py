@@ -25,7 +25,7 @@ def setup_demo():
         servers_collection = mongo.get_collection('servers')
         clients_collection = mongo.get_collection('clients')
 
-        clients_collection.remove({})
+        clients_collection.delete_many({})
 
         for hst in host.iter_hosts():
             hosts_collection.update_one({
@@ -117,6 +117,6 @@ def setup_demo():
 
         logger.info('Demo initiated', 'demo')
 
-    thread = threading.Thread(target=thread)
+    thread = threading.Thread(name="SetupDemo", target=thread)
     thread.daemon = True
     thread.start()

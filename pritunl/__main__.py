@@ -5,6 +5,8 @@ import sys
 import os
 import time
 import json
+import uuid
+import shutil
 
 USAGE = """\
 Usage: pritunl [command] [options]
@@ -19,8 +21,12 @@ Commands:
   reset-version         Reset database version to server version
   reset-ssl-cert        Reset the server ssl certificate
   renew-ssl-cert        Renew the Lets Encrypt server ssl certificate
+  renew-org             Renew organization and user certificates
   reconfigure           Reconfigure database connection
   clear-message-cache   Clear the cache of the internal message system
+  disable-admin-api     Disable API key authentication for all admin users
+  override-device-key   Allow device registration without key for 8 hours
+  require-device-key    Remove device registration key override
   get-mongodb           Get the current mongodb uri
   set-mongodb           Set the mongodb uri
   get-host-id           Get the current host id
@@ -28,6 +34,22 @@ Commands:
   logs                  View server logs
   clear-auth-limit      Reset failed authentication attempt limiter
   clear-logs            Clear server logs"""
+
+ascii_art = r"""##############################################################
+#                                                            #
+#                      /$$   /$$                         /$$ #
+#                     |__/  | $$                        | $$ #
+#   /$$$$$$   /$$$$$$  /$$ /$$$$$$   /$$   /$$ /$$$$$$$ | $$ #
+#  /$$__  $$ /$$__  $$| $$|_  $$_/  | $$  | $$| $$__  $$| $$ #
+# | $$  \ $$| $$  \__/| $$  | $$    | $$  | $$| $$  \ $$| $$ #
+# | $$  | $$| $$      | $$  | $$ /$$| $$  | $$| $$  | $$| $$ #
+# | $$$$$$$/| $$      | $$  |  $$$$/|  $$$$$$/| $$  | $$| $$ #
+# | $$____/ |__/      |__/   \____/  \______/ |__/  |__/|__/ #
+# | $$                                                       #
+# | $$                                                       #
+# |__/                                                       #
+#                                                            #
+##############################################################"""
 
 def main(default_conf=None):
     if len(sys.argv) > 1:
@@ -227,6 +249,33 @@ def main(default_conf=None):
             'in the cluster.')
 
         sys.exit(0)
+    elif cmd == 'override-device-key':
+        from pritunl import setup
+        from pritunl import settings
+        setup.setup_db_host()
+
+        settings.user.device_key_override = int(time.time())
+        settings.commit()
+
+        time.sleep(.2)
+
+        print('Device registration key override active for 8 hours. ' +
+            'Use command require-device-key to reactivate.')
+
+        sys.exit(0)
+    elif cmd == 'require-device-key':
+        from pritunl import setup
+        from pritunl import settings
+        setup.setup_db_host()
+
+        settings.user.device_key_override = None
+        settings.commit()
+
+        time.sleep(.2)
+
+        print('Device registration key override deactivated.')
+
+        sys.exit(0)
     elif cmd == 'get-mongodb':
         from pritunl import setup
         from pritunl import settings
@@ -309,20 +358,95 @@ def main(default_conf=None):
         print('Server ssl certificate successfully renewed')
 
         sys.exit(0)
+    elif cmd == 'renew-org':
+        from pritunl.constants import (
+            CERT_SERVER, CERT_CLIENT_POOL, CERT_SERVER_POOL
+        )
+        from pritunl import setup
+        from pritunl import settings
+        from pritunl import organization
+        from pritunl import server
+        from pritunl import database
+        setup.setup_db()
+        temp_path = '/tmp/pritunl_' + uuid.uuid4().hex
+        settings.conf.temp_path = temp_path
+
+        if len(args) > 1:
+            org_id = database.ParseObjectId(args[1])
+        else:
+            print('Missing required organization ID. Hold shift and click ' +
+                'the green organization label in the web console to ' +
+                'get the ID.')
+            sys.exit(1)
+
+        org = organization.get_by_id(org_id)
+        if not org:
+            print('Failed to find organization. Hold shift and click ' +
+                'the green organization label in the web console to ' +
+                'get the ID.')
+            sys.exit(1)
+
+        print(f'Renewing organization: {org.name}')
+        org.renew()
+        org.commit()
+
+        i = 0
+        count, users = org.iter_users_all()
+        for usr in users:
+            i += 1
+            if usr.type == CERT_CLIENT_POOL:
+                print(f'Renewing reserve user [{i}/{count}]: {usr.id}')
+            elif usr.type == CERT_SERVER_POOL:
+                print(f'Renewing reserve server user [{i}/{count}]: {usr.id}')
+            elif usr.type == CERT_SERVER:
+                print(f'Renewing server user [{i}/{count}]: {usr.id}')
+            else:
+                print(f'Renewing user [{i}/{count}]: {usr.name}')
+            usr.renew()
+            usr.commit()
+
+        for svr in server.iter_servers():
+            print(f'Refreshing server configuration: {svr.name}')
+            svr.generate_ca_cert()
+            svr.commit('ca_certificate')
+
+        time.sleep(1)
+        print('Organization renewal complete')
+
+        shutil.rmtree(temp_path, ignore_errors=True)
+        sys.exit(0)
     elif cmd == 'clear-message-cache':
         from pritunl import setup
         from pritunl import logger
         from pritunl import mongo
+        from pritunl import settings
+        from pritunl import utils
 
         setup.setup_db()
 
         print('Clearing message cache...')
 
+        prefix = settings.conf.mongodb_collection_prefix or ''
         mongo.get_collection('messages').drop()
-
-        setup.upsert_indexes()
+        mongo.secondary_database.create_collection(
+            prefix + 'messages', capped=True,
+            size=20971520, max=5000)
+        mongo.get_collection('messages').insert_one({
+            'message': None,
+            'timestamp': utils.now(),
+        })
 
         print('Message cache cleared')
+
+        sys.exit(0)
+    elif cmd == 'disable-admin-api':
+        from pritunl import setup
+        from pritunl import auth
+
+        setup.setup_db()
+        auth.disable_admin_api()
+
+        print('Administrator API token authentication disabled')
 
         sys.exit(0)
     elif cmd == 'destroy-secondary':
@@ -520,21 +644,7 @@ def main(default_conf=None):
                     pid_file.write('%s' % pid)
             sys.exit(0)
     elif not options.quiet:
-        print('##############################################################')
-        print('#                                                            #')
-        print('#                      /$$   /$$                         /$$ #')
-        print('#                     |__/  | $$                        | $$ #')
-        print('#   /$$$$$$   /$$$$$$  /$$ /$$$$$$   /$$   /$$ /$$$$$$$ | $$ #')
-        print('#  /$$__  $$ /$$__  $$| $$|_  $$_/  | $$  | $$| $$__  $$| $$ #')
-        print('# | $$  \ $$| $$  \__/| $$  | $$    | $$  | $$| $$  \ $$| $$ #')
-        print('# | $$  | $$| $$      | $$  | $$ /$$| $$  | $$| $$  | $$| $$ #')
-        print('# | $$$$$$$/| $$      | $$  |  $$$$/|  $$$$$$/| $$  | $$| $$ #')
-        print('# | $$____/ |__/      |__/   \____/  \______/ |__/  |__/|__/ #')
-        print('# | $$                                                       #')
-        print('# | $$                                                       #')
-        print('# |__/                                                       #')
-        print('#                                                            #')
-        print('##############################################################')
+        print(ascii_art)
 
     pritunl.init_server()
 

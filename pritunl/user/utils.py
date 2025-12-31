@@ -11,10 +11,12 @@ def new_pooled_user(org, type):
         CERT_CLIENT: CERT_CLIENT_POOL,
     }[type]
 
-    thread = threading.Thread(target=org.new_user, kwargs={
-        'type': type,
-        'block': False,
-    })
+    thread = threading.Thread(name="PoolNewUser",
+        target=org.new_user, kwargs={
+            'type': type,
+            'block': False,
+        },
+    )
     thread.daemon = True
     thread.start()
 
@@ -56,7 +58,7 @@ def reserve_pooled_user(org, name=None, email=None, pin=None, type=CERT_CLIENT,
     if port_forwarding is not None:
         doc['port_forwarding'] = port_forwarding
 
-    doc = User.collection.find_and_modify({
+    doc = User.collection.find_one_and_update({
         'org_id': org.id,
         'type': {
             CERT_SERVER: CERT_SERVER_POOL,
@@ -64,10 +66,12 @@ def reserve_pooled_user(org, name=None, email=None, pin=None, type=CERT_CLIENT,
         }[type],
     }, {
         '$set': doc,
-    }, new=True)
+    }, return_document=True)
 
     if doc:
-        return User(org=org, doc=doc)
+        usr = User(org=org, doc=doc)
+        usr.assign_ip_addr()
+        return usr
 
 def get_user(org, id, fields=None):
     return User(org=org, id=id, fields=fields)
@@ -113,6 +117,7 @@ def iter_unreg_devices():
         'devices.registered': False,
     }).sort('name')
 
+    override = User.is_device_key_override
     for doc in cursor:
         devices = doc.get('devices')
         if not devices:
@@ -129,4 +134,5 @@ def iter_unreg_devices():
                 'user_name': doc.get('name'),
                 'name': device.get('name'),
                 'platform': device.get('platform'),
+                'override': override,
             }

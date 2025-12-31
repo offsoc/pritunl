@@ -213,11 +213,45 @@ def server_put_post(server_id=None):
         network_end_def = True
         network_end = flask.request.json['network_end']
 
+    hide_ovpn = None
+    hide_ovpn_def = False
+    if 'hide_ovpn' in flask.request.json:
+        hide_ovpn_def = True
+        hide_ovpn = True if flask.request.json['hide_ovpn'] \
+            else False
+
+    ovpn_dco = None
+    ovpn_dco_def = False
+    if 'ovpn_dco' in flask.request.json:
+        ovpn_dco_def = True
+        ovpn_dco = True if flask.request.json['ovpn_dco'] else False
+
     dynamic_firewall = None
     dynamic_firewall_def = False
     if 'dynamic_firewall' in flask.request.json:
         dynamic_firewall_def = True
         dynamic_firewall = True if flask.request.json['dynamic_firewall'] \
+            else False
+
+    bypass_sso_auth = None
+    bypass_sso_auth_def = False
+    if 'bypass_sso_auth' in flask.request.json:
+        bypass_sso_auth_def = True
+        bypass_sso_auth = True if flask.request.json['bypass_sso_auth'] \
+            else False
+
+    geo_sort = None
+    geo_sort_def = False
+    if 'geo_sort' in flask.request.json:
+        geo_sort_def = True
+        geo_sort = True if flask.request.json['geo_sort'] \
+            else False
+
+    force_connect = None
+    force_connect_def = False
+    if 'force_connect' in flask.request.json:
+        force_connect_def = True
+        force_connect = True if flask.request.json['force_connect'] \
             else False
 
     route_dns = None
@@ -372,6 +406,18 @@ def server_put_post(server_id=None):
         ping_timeout_def = True
         ping_timeout = int(flask.request.json['ping_timeout'] or 60)
 
+    ping_interval_wg = None
+    ping_interval_wg_def = False
+    if 'ping_interval_wg' in flask.request.json:
+        ping_interval_wg_def = True
+        ping_interval_wg = int(flask.request.json['ping_interval_wg'] or 30)
+
+    ping_timeout_wg = None
+    ping_timeout_wg_def = False
+    if 'ping_timeout_wg' in flask.request.json:
+        ping_timeout_wg_def = True
+        ping_timeout_wg = int(flask.request.json['ping_timeout_wg'] or 120)
+
     link_ping_interval = None
     link_ping_interval_def = False
     if 'link_ping_interval' in flask.request.json:
@@ -479,6 +525,22 @@ def server_put_post(server_id=None):
         mss_fix = flask.request.json['mss_fix'] or None
         if mss_fix:
             mss_fix = int(mss_fix) or None
+
+    tun_mtu = None
+    tun_mtu_def = False
+    if 'tun_mtu' in flask.request.json:
+        tun_mtu_def = True
+        tun_mtu = flask.request.json['tun_mtu'] or None
+        if tun_mtu:
+            tun_mtu = int(tun_mtu) or None
+
+    fragment = None
+    fragment_def = False
+    if 'fragment' in flask.request.json:
+        fragment_def = True
+        fragment = flask.request.json['fragment'] or None
+        if fragment:
+            fragment = int(fragment) or None
 
     multihome = False
     multihome_def = False
@@ -612,6 +674,7 @@ def server_put_post(server_id=None):
             dh_param_bits = settings.vpn.default_dh_param_bits
 
     changed = None
+    allow_online = True
 
     if not server_id:
         svr = server.new_server(
@@ -622,7 +685,12 @@ def server_put_post(server_id=None):
             network_mode=network_mode,
             network_start=network_start,
             network_end=network_end,
+            hide_ovpn=hide_ovpn,
+            ovpn_dco=ovpn_dco,
             dynamic_firewall=dynamic_firewall,
+            bypass_sso_auth=bypass_sso_auth,
+            geo_sort=geo_sort,
+            force_connect=force_connect,
             route_dns=route_dns,
             device_auth=device_auth,
             restrict_routes=restrict_routes,
@@ -647,6 +715,8 @@ def server_put_post(server_id=None):
             inter_client=inter_client,
             ping_interval=ping_interval,
             ping_timeout=ping_timeout,
+            ping_interval_wg=ping_interval_wg,
+            ping_timeout_wg=ping_timeout_wg,
             link_ping_interval=link_ping_interval,
             link_ping_timeout=link_ping_timeout,
             inactive_timeout=inactive_timeout,
@@ -660,6 +730,8 @@ def server_put_post(server_id=None):
             debug=debug,
             pre_connect_msg=pre_connect_msg,
             mss_fix=mss_fix,
+            tun_mtu=tun_mtu,
+            fragment=fragment,
             multihome=multihome,
         )
         svr.add_host(settings.local.host_id)
@@ -668,108 +740,197 @@ def server_put_post(server_id=None):
 
         if name_def:
             svr.name = name
-        if network_def:
+        if network_def and svr.network != network:
+            allow_online = False
             svr.network = network
-        if network_wg_def:
+        if network_wg_def and svr.network_wg != network_wg:
+            allow_online = False
             svr.network_wg = network_wg
-        if groups_def:
+        if groups_def and svr.groups != groups:
+            allow_online = False # TODO
             svr.groups = groups
-        if network_start_def:
+        if network_start_def and svr.network_start != network_start:
+            allow_online = False
             svr.network_start = network_start
-        if network_end_def:
+        if network_end_def and svr.network_end != network_end:
+            allow_online = False
             svr.network_end = network_end
-        if dynamic_firewall_def:
+        if hide_ovpn_def:
+            svr.hide_ovpn = hide_ovpn
+        if ovpn_dco_def and svr.ovpn_dco != ovpn_dco:
+            allow_online = False
+            svr.ovpn_dco = ovpn_dco
+        if dynamic_firewall_def and svr.dynamic_firewall != dynamic_firewall:
+            allow_online = False
             svr.dynamic_firewall = dynamic_firewall
-        if route_dns_def:
+        if bypass_sso_auth_def and svr.bypass_sso_auth != bypass_sso_auth:
+            allow_online = False
+            svr.bypass_sso_auth = bypass_sso_auth
+        if geo_sort_def:
+            svr.geo_sort = geo_sort
+        if force_connect_def:
+            svr.force_connect = force_connect
+        if route_dns_def and svr.route_dns != route_dns:
+            allow_online = False
             svr.route_dns = route_dns
-        if device_auth_def:
+        if device_auth_def and svr.device_auth != device_auth:
+            allow_online = False
             svr.device_auth = device_auth
-        if restrict_routes_def:
+        if restrict_routes_def and svr.restrict_routes != restrict_routes:
+            allow_online = False
             svr.restrict_routes = restrict_routes
-        if wg_def:
+        if wg_def and svr.wg != wg:
+            allow_online = False
             svr.wg = wg
-        if ipv6_def:
+        if ipv6_def and svr.ipv6 != ipv6:
+            allow_online = False
             svr.ipv6 = ipv6
-        if ipv6_firewall_def:
+        if ipv6_firewall_def and svr.ipv6_firewall != ipv6_firewall:
+            allow_online = False
             svr.ipv6_firewall = ipv6_firewall
-        if network_mode_def:
+        if network_mode_def and svr.network_mode != network_mode:
+            allow_online = False
             svr.network_mode = network_mode
-        if bind_address_def:
+        if bind_address_def and svr.bind_address != bind_address:
+            allow_online = False
             svr.bind_address = bind_address
-        if port_def:
+        if port_def and svr.port != port:
+            allow_online = False
             svr.port = port
-        if port_wg_def:
+        if port_wg_def and svr.port_wg != port_wg:
+            allow_online = False
             svr.port_wg = port_wg
-        if protocol_def:
+        if protocol_def and svr.protocol != protocol:
+            allow_online = False
             svr.protocol = protocol
         if dh_param_bits_def and svr.dh_param_bits != dh_param_bits:
+            allow_online = False
             svr.dh_param_bits = dh_param_bits
             svr.generate_dh_param()
-        if multi_device_def:
+        if multi_device_def and svr.multi_device != multi_device:
+            allow_online = False
             svr.multi_device = multi_device
-        if dns_servers_def:
+        if dns_servers_def and svr.dns_servers != dns_servers:
+            allow_online = False # TODO
             svr.dns_servers = dns_servers
-        if search_domain_def:
+        if search_domain_def and svr.search_domain != search_domain:
+            allow_online = False # TODO
             svr.search_domain = search_domain
-        if otp_auth_def:
+        if otp_auth_def and svr.otp_auth != otp_auth:
+            allow_online = False
             svr.otp_auth = otp_auth
-        if sso_auth_def:
+        if sso_auth_def and svr.sso_auth != sso_auth:
+            allow_online = False
             svr.sso_auth = sso_auth
-        if cipher_def:
+        if cipher_def and svr.cipher != cipher:
+            allow_online = False
             svr.cipher = cipher
-        if hash_def:
+        if hash_def and svr.hash != hash:
+            allow_online = False
             svr.hash = hash
         if block_outside_dns_def:
             svr.block_outside_dns = block_outside_dns
-        if jumbo_frames_def:
+        if jumbo_frames_def and svr.jumbo_frames != jumbo_frames:
+            allow_online = False
             svr.jumbo_frames = jumbo_frames
-        if lzo_compression_def:
+        if lzo_compression_def and svr.lzo_compression != lzo_compression:
+            allow_online = False
             svr.lzo_compression = lzo_compression
-        if inter_client_def:
+        if inter_client_def and svr.inter_client != inter_client:
+            allow_online = False
             svr.inter_client = inter_client
-        if ping_interval_def:
+        if ping_interval_def and svr.ping_interval != ping_interval:
+            allow_online = False
             svr.ping_interval = ping_interval
-        if ping_timeout_def:
+        if ping_timeout_def and svr.ping_timeout != ping_timeout:
+            allow_online = False
             svr.ping_timeout = ping_timeout
-        if link_ping_interval_def:
+        if ping_interval_wg_def and svr.ping_interval_wg != ping_interval_wg:
+            allow_online = False # TODO
+            svr.ping_interval_wg = ping_interval_wg
+        if ping_timeout_wg_def and svr.ping_timeout_wg != ping_timeout_wg:
+            allow_online = False # TODO
+            svr.ping_timeout_wg = ping_timeout_wg
+        if link_ping_interval_def and \
+                svr.link_ping_interval != link_ping_interval:
+            allow_online = False # TODO
             svr.link_ping_interval = link_ping_interval
-        if link_ping_timeout_def:
+        if link_ping_timeout_def and \
+                svr.link_ping_timeout != link_ping_timeout:
+            allow_online = False # TODO
             svr.link_ping_timeout = link_ping_timeout
-        if inactive_timeout_def:
+        if inactive_timeout_def and svr.inactive_timeout != inactive_timeout:
+            allow_online = False # TODO
             svr.inactive_timeout = inactive_timeout
-        if session_timeout_def:
+        if session_timeout_def and svr.session_timeout != session_timeout:
+            allow_online = False # TODO
             svr.session_timeout = session_timeout
-        if allowed_devices_def:
+        if allowed_devices_def and svr.allowed_devices != allowed_devices:
+            allow_online = False # TODO
             svr.allowed_devices = allowed_devices
-        if max_clients_def:
+        if max_clients_def and svr.max_clients != max_clients:
+            allow_online = False # TODO
             svr.max_clients = max_clients
-        if max_devices_def:
+        if max_devices_def and svr.max_devices != max_devices:
+            allow_online = False # TODO
             svr.max_devices = max_devices
         if replica_count_def:
             svr.replica_count = replica_count
-        if vxlan_def:
+        if vxlan_def and svr.vxlan != vxlan:
+            allow_online = False
             svr.vxlan = vxlan
-        if dns_mapping_def:
+        if dns_mapping_def and svr.dns_mapping != dns_mapping:
+            allow_online = False
             svr.dns_mapping = dns_mapping
-        if debug_def:
+        if debug_def and svr.debug != debug:
+            allow_online = False
             svr.debug = debug
         if pre_connect_msg_def:
             svr.pre_connect_msg = pre_connect_msg
-        if mss_fix_def:
+        if mss_fix_def and svr.mss_fix != mss_fix:
+            allow_online = False
             svr.mss_fix = mss_fix
-        if multihome_def:
+        if tun_mtu_def and svr.tun_mtu != tun_mtu:
+            allow_online = False
+            svr.tun_mtu = tun_mtu
+        if fragment_def and svr.fragment != fragment:
+            allow_online = False
+            svr.fragment = fragment
+        if multihome_def and svr.multihome != multihome:
+            allow_online = False
             svr.multihome = multihome
 
         changed = svr.changed
 
     svr.generate_auth_key()
 
-    err, err_msg = svr.validate_conf()
+    err, err_msg = svr.validate_conf(allow_online=allow_online)
     if err:
         return utils.jsonify({
             'error': err,
             'error_msg': err_msg,
         }, 400)
+
+    dns_server_route = ''
+    for dns_server in svr.dns_servers:
+        try:
+            if ':' in dns_server:
+                dns_server_route = str(
+                    ipaddress.ip_address(dns_server)) + '/128'
+            else:
+                dns_server_route = str(
+                    ipaddress.ip_address(dns_server)) + '/32'
+            break
+        except (ipaddress.AddressValueError, ValueError):
+            pass
+
+    if dns_server_route:
+        for route in svr.routes:
+            if route.get('comment') == 'DNS Server' and \
+                    route['network'] != dns_server_route:
+                route['network'] = dns_server_route
+                if changed:
+                    changed.add('routes')
 
     svr.commit(changed)
 

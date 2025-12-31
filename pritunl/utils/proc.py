@@ -51,7 +51,7 @@ class Process(object):
     def run(self, timeout=None):
         from pritunl import logger
 
-        thread = threading.Thread(target=self._proc_thread)
+        thread = threading.Thread(name="ProcExec", target=self._proc_thread)
         thread.daemon = True
         thread.start()
 
@@ -87,3 +87,6 @@ class Process(object):
 
             raise subprocess.CalledProcessError(
                 self._return_code, cmd, output=self._stdoutdata)
+
+    def return_code(self):
+        return self._return_code

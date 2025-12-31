@@ -113,7 +113,7 @@ def _find_doc(query, one_time=None, one_time_new=False):
 
     return doc
 
-@app.app.route('/key/<org_id>/<user_id>.tar', methods=['GET'])
+@app.app.route('/data/<org_id>/<user_id>.tar', methods=['GET'])
 @auth.session_light_auth
 def user_key_tar_archive_get(org_id, user_id):
     remote_addr = utils.get_remote_addr()
@@ -133,7 +133,7 @@ def user_key_tar_archive_get(org_id, user_id):
 
     return resp
 
-@app.app.route('/key/<org_id>/<user_id>.zip', methods=['GET'])
+@app.app.route('/data/<org_id>/<user_id>.zip', methods=['GET'])
 @auth.session_light_auth
 def user_key_zip_archive_get(org_id, user_id):
     remote_addr = utils.get_remote_addr()
@@ -153,7 +153,7 @@ def user_key_zip_archive_get(org_id, user_id):
 
     return resp
 
-@app.app.route('/key_onc/<org_id>/<user_id>.onc', methods=['GET'])
+@app.app.route('/data/<org_id>/<user_id>.onc', methods=['GET'])
 @auth.session_light_auth
 def user_key_onc_archive_get(org_id, user_id):
     remote_addr = utils.get_remote_addr()
@@ -173,7 +173,7 @@ def user_key_onc_archive_get(org_id, user_id):
 
     return resp
 
-@app.app.route('/key/<org_id>/<user_id>', methods=['GET'])
+@app.app.route('/data/<org_id>/<user_id>', methods=['GET'])
 @auth.session_auth
 def user_key_link_get(org_id, user_id):
     remote_addr = utils.get_remote_addr()
@@ -194,7 +194,7 @@ def user_key_link_get(org_id, user_id):
 
     return utils.jsonify(org.create_user_key_link(user_id))
 
-@app.app.route('/key/<org_id>/<user_id>/<server_id>.key', methods=['GET'])
+@app.app.route('/data/<org_id>/<user_id>/<server_id>.key', methods=['GET'])
 @auth.session_light_auth
 def user_linked_key_conf_get(org_id, user_id, server_id):
     remote_addr = utils.get_remote_addr()
@@ -307,7 +307,7 @@ def user_linked_key_zip_archive_get(key_id):
 
     return resp
 
-@app.app.route('/key_onc/<key_id>.onc', methods=['GET'])
+@app.app.route('/key/<key_id>.onc', methods=['GET'])
 @auth.open_auth
 def user_linked_key_onc_archive_get(key_id):
     key_id = key_id[:128]
@@ -533,7 +533,7 @@ def user_linked_key_page_get(short_code):
     if settings.local.sub_active:
         conf_links += '<a class="btn btn-success download-chrome" ' + \
             'title="Download Chrome OS Profile" ' + \
-            'href="/key_onc/%s.onc">Download Chrome OS Profile</a>\n' % (
+            'href="/key/%s.onc">Download Chrome OS Profile</a>\n' % (
                 doc['key_id'])
 
     has_servers = False
@@ -565,7 +565,7 @@ def user_linked_key_page_delete(short_code):
     )
 
     collection = mongo.get_collection('users_key_link')
-    collection.remove({
+    collection.delete_one({
         'short_id': short_code,
     })
 
@@ -685,6 +685,12 @@ def key_sync_get(org_id, user_id, server_id, key_hash):
     server_id = server_id
     key_hash = key_hash[:256]
     remote_addr = utils.get_remote_addr()
+
+    version = flask.request.args.get('ver', None)
+    if version:
+        version = int(version)
+    else:
+        version = 0
 
     if not settings.user.conf_sync:
         return utils.jsonify({})
@@ -813,7 +819,7 @@ def key_sync_get(org_id, user_id, server_id, key_hash):
         )
         return flask.abort(409)
 
-    key_conf = usr.sync_conf(server_id, key_hash)
+    key_conf = usr.sync_conf(server_id, key_hash, version)
     if key_conf:
         usr.audit_event('user_profile',
             'User profile synced from pritunl client',
@@ -973,6 +979,13 @@ def key_wg_post(org_id, user_id, server_id):
         )
         return flask.abort(409)
 
+    instance = server.get_instance(server_id)
+    if not instance or instance.state != 'running':
+        return flask.abort(429)
+
+    if not instance.server.wg:
+        return flask.abort(429)
+
     data_hash = hashlib.sha512(
         '&'.join([cipher_data64, box_nonce64, public_key64]).encode(),
     ).digest()
@@ -1021,6 +1034,8 @@ def key_wg_post(org_id, user_id, server_id):
     key_data = json.loads(plaintext)
 
     client_platform = utils.filter_str(key_data['platform'])
+    client_ver = utils.filter_str(key_data.get('client_ver'))
+    ovpn_ver = utils.filter_str(key_data.get('ovpn_ver'))
     client_device_id = utils.filter_str(key_data['device_id'])
     client_device_name = utils.filter_str(key_data['device_name'])
     client_device_hostname = utils.filter_str(
@@ -1190,14 +1205,7 @@ def key_wg_post(org_id, user_id, server_id):
                 'error_msg': 'Device signature invalid.',
             }, 400)
 
-    instance = server.get_instance(server_id)
-    if not instance or instance.state != 'running':
-        return flask.abort(429)
-
-    if not instance.server.wg:
-        return flask.abort(429)
-
-    if instance.server.sso_auth:
+    if not instance.server.bypass_sso_auth and instance.server.sso_auth:
         return _key_request_init(org.id, usr.id, svr.id, 'wg')
 
     wg_keys_collection = mongo.get_collection('wg_keys')
@@ -1242,6 +1250,8 @@ def key_wg_post(org_id, user_id, server_id):
         auth_timestamp=client_auth_timestamp,
         sso_token=None,
         platform=client_platform,
+        client_ver=client_ver,
+        ovpn_ver=ovpn_ver,
         device_id=client_device_id,
         device_name=client_device_name,
         mac_addr=client_mac_addr,
@@ -1383,12 +1393,12 @@ def key_wg_put(org_id, user_id, server_id):
         flask.request.path, cipher_data64, box_nonce64, public_key64,
         signature64])
 
-    if len(auth_string) > AUTH_SIG_STRING_MAX_LEN:
+    if len(auth_string) > AUTH_SIG_STRING_MAX_LEN or len(auth_nonce) < 8:
         journal.entry(
             journal.USER_WG_FAILURE,
             usr.journal_data,
             remote_address=remote_addr,
-            event_long='Auth string len limit exceeded',
+            event_long='Invalid signature or nonce length',
         )
         return flask.abort(414)
 
@@ -1419,23 +1429,6 @@ def key_wg_put(org_id, user_id, server_id):
             event_long='Duplicate nonce from reconnection',
         )
         return flask.abort(409)
-
-    data_hash = hashlib.sha512(
-        '&'.join([cipher_data64, box_nonce64, public_key64]).encode(),
-    ).digest()
-    try:
-        usr.verify_sig(
-            data_hash,
-            base64.b64decode(signature64),
-        )
-    except InvalidSignature:
-        journal.entry(
-            journal.USER_WG_FAILURE,
-            usr.journal_data,
-            remote_address=remote_addr,
-            event_long='Invalid rsa signature',
-        )
-        return flask.abort(412)
 
     svr = usr.get_server(server_id)
 
@@ -1688,6 +1681,10 @@ def key_ovpn_post(org_id, user_id, server_id):
         )
         return flask.abort(409)
 
+    instance = server.get_instance(server_id)
+    if not instance or instance.state != 'running':
+        return flask.abort(429)
+
     data_hash = hashlib.sha512(
         '&'.join([cipher_data64, box_nonce64, public_key64]).encode(),
     ).digest()
@@ -1736,6 +1733,8 @@ def key_ovpn_post(org_id, user_id, server_id):
     key_data = json.loads(plaintext)
 
     client_platform = utils.filter_str(key_data['platform'])
+    client_ver = utils.filter_str(key_data.get('client_ver'))
+    ovpn_ver = utils.filter_str(key_data.get('ovpn_ver'))
     client_device_id = utils.filter_str(key_data['device_id'])
     client_device_name = utils.filter_str(key_data['device_name'])
     client_device_hostname = utils.filter_str(
@@ -1875,11 +1874,7 @@ def key_ovpn_post(org_id, user_id, server_id):
                 'error_msg': 'Device signature invalid.',
             }, 400)
 
-    instance = server.get_instance(server_id)
-    if not instance or instance.state != 'running':
-        return flask.abort(429)
-
-    if instance.server.sso_auth:
+    if not instance.server.bypass_sso_auth and instance.server.sso_auth:
         return _key_request_init(org.id, usr.id, svr.id, 'ovpn')
 
     if not instance.server.dynamic_firewall and \
@@ -1913,6 +1908,8 @@ def key_ovpn_post(org_id, user_id, server_id):
         auth_timestamp=client_auth_timestamp,
         sso_token=None,
         platform=client_platform,
+        client_ver=client_ver,
+        ovpn_ver=ovpn_ver,
         device_id=client_device_id,
         device_name=client_device_name,
         mac_addr=client_mac_addr,
@@ -1960,6 +1957,16 @@ def key_ovpn_post(org_id, user_id, server_id):
 def _key_request_init(org_id, user_id, server_id, mode):
     state = utils.rand_str(64)
     token = utils.rand_str(32)
+    sso_mode = settings.app.sso
+
+    if sso_mode in (RADIUS_AUTH, RADIUS_DUO_AUTH, PLUGIN_AUTH):
+        logger.error(
+            'Connection single sign-on not supported with current mode. ' +
+              'Disable single sign-on authentication in server settings.',
+            'key',
+            sso_mode=sso_mode,
+        )
+        return flask.abort(401)
 
     tokens_collection = mongo.get_collection('key_tokens')
     tokens_collection.insert_one({
@@ -1999,9 +2006,9 @@ def key_request_get():
     state = flask.request.args.get('state')
 
     tokens_collection = mongo.get_collection('key_tokens')
-    doc = tokens_collection.find_and_modify(query={
+    doc = tokens_collection.find_one_and_delete({
         '_id': state,
-    }, remove=True)
+    })
 
     if not doc or doc['type'] != KEY_REQUEST_AUTH:
         return flask.abort(404)
@@ -2041,7 +2048,8 @@ def key_request_get():
         )
 
         if resp.status_code != 200:
-            logger.error('Azure auth server error', 'sso',
+            logger.error('Azure auth server error, ' +
+                'check https://docs.pritunl.com/kb/vpn/outage', 'sso',
                 status_code=resp.status_code,
                 content=resp.content,
             )
@@ -2082,7 +2090,8 @@ def key_request_get():
         )
 
         if resp.status_code != 200:
-            logger.error('Google auth server error', 'sso',
+            logger.error('Google auth server error, ' +
+                'check https://docs.pritunl.com/kb/vpn/outage', 'sso',
                 status_code=resp.status_code,
                 content=resp.content,
             )
@@ -2126,7 +2135,8 @@ def key_request_get():
                              )
 
         if resp.status_code != 200:
-            logger.error('Auth0 auth server error', 'sso',
+            logger.error('Auth0 auth server error, ' +
+                'check https://docs.pritunl.com/kb/vpn/outage', 'sso',
                 status_code=resp.status_code,
                 content=resp.content,
             )
@@ -2167,7 +2177,8 @@ def key_request_get():
                              )
 
         if resp.status_code != 200:
-            logger.error('Slack auth server error', 'sso',
+            logger.error('Slack auth server error, ' +
+                'check https://docs.pritunl.com/kb/vpn/outage', 'sso',
                 status_code=resp.status_code,
                 content=resp.content,
             )
@@ -2211,7 +2222,8 @@ def key_request_get():
         )
 
         if resp.status_code != 200:
-            logger.error('Saml auth server error', 'sso',
+            logger.error('Saml auth server error, ' +
+                'check https://docs.pritunl.com/kb/vpn/outage', 'sso',
                 status_code=resp.status_code,
                 content=resp.content,
             )
@@ -2398,12 +2410,21 @@ def key_callback_get():
     sig = flask.request.args.get('sig')
 
     tokens_collection = mongo.get_collection('key_tokens')
-    doc = tokens_collection.find_and_modify(query={
+    doc = tokens_collection.find_one_and_delete({
         '_id': state,
-    }, remove=True)
+    })
 
     if not doc:
         return flask.abort(404)
+
+    org_id = doc['org_id']
+    user_id = doc['user_id']
+    server_id = doc['server_id']
+
+    org = organization.get_by_id(org_id)
+    usr = org.get_user(user_id)
+    if usr.disabled:
+        return flask.abort(403)
 
     query = flask.request.query_string.split('&sig='.encode())[0]
     test_sig = base64.urlsafe_b64encode(hmac.new(str(doc['secret']).encode(),
@@ -2834,7 +2855,7 @@ def key_callback_get():
 
         return duo_page.get_response()
 
-    if YUBICO_AUTH in sso_mode:
+    if usr.yubico_id or YUBICO_AUTH in sso_mode:
         state = utils.generate_secret()
 
         tokens_collection = mongo.get_collection('key_tokens')
@@ -2888,9 +2909,9 @@ def key_duo_post():
         }, 401)
 
     tokens_collection = mongo.get_collection('key_tokens')
-    doc = tokens_collection.find_and_modify(query={
+    doc = tokens_collection.find_one_and_delete({
         '_id': token,
-    }, remove=True)
+    })
     if not doc or doc['_id'] != token or doc['type'] != DUO_AUTH:
         journal.entry(
             journal.SSO_AUTH_FAILURE,
@@ -2996,9 +3017,14 @@ def key_yubico_post():
     token = utils.filter_str(flask.request.json.get('token')) or None
     key = utils.filter_str(flask.request.json.get('key')) or None
 
-    if sso_mode not in (AZURE_YUBICO_AUTH, GOOGLE_YUBICO_AUTH,
-            AUTHZERO_YUBICO_AUTH, SLACK_YUBICO_AUTH, SAML_YUBICO_AUTH,
-            SAML_OKTA_YUBICO_AUTH, SAML_ONELOGIN_YUBICO_AUTH,
+    if sso_mode not in (AZURE_AUTH, AZURE_DUO_AUTH, AZURE_YUBICO_AUTH,
+            GOOGLE_AUTH, GOOGLE_DUO_AUTH, GOOGLE_YUBICO_AUTH,
+            AUTHZERO_AUTH, AUTHZERO_DUO_AUTH, AUTHZERO_YUBICO_AUTH,
+            SLACK_AUTH, SLACK_DUO_AUTH, SLACK_YUBICO_AUTH, SAML_AUTH,
+            SAML_DUO_AUTH, SAML_YUBICO_AUTH, SAML_OKTA_AUTH,
+            SAML_OKTA_DUO_AUTH, SAML_OKTA_YUBICO_AUTH, SAML_ONELOGIN_AUTH,
+            SAML_ONELOGIN_DUO_AUTH, SAML_ONELOGIN_YUBICO_AUTH,
+            SAML_JUMPCLOUD_AUTH, SAML_JUMPCLOUD_DUO_AUTH,
             SAML_JUMPCLOUD_YUBICO_AUTH):
         return flask.abort(404)
 
@@ -3009,9 +3035,9 @@ def key_yubico_post():
         }, 401)
 
     tokens_collection = mongo.get_collection('key_tokens')
-    doc = tokens_collection.find_and_modify(query={
+    doc = tokens_collection.find_one_and_delete({
         '_id': token,
-    }, remove=True)
+    })
     if not doc or doc['_id'] != token or doc['type'] != YUBICO_AUTH:
         journal.entry(
             journal.SSO_AUTH_FAILURE,
@@ -3231,6 +3257,8 @@ def key_ovpn_wait_post(org_id, user_id, server_id):
     key_data = json.loads(plaintext)
 
     client_platform = utils.filter_str(key_data['platform'])
+    client_ver = utils.filter_str(key_data.get('client_ver'))
+    ovpn_ver = utils.filter_str(key_data.get('ovpn_ver'))
     client_device_id = utils.filter_str(key_data['device_id'])
     client_device_name = utils.filter_str(key_data['device_name'])
     client_device_hostname = utils.filter_str(
@@ -3375,7 +3403,7 @@ def key_ovpn_wait_post(org_id, user_id, server_id):
     if not instance or instance.state != 'running':
         return flask.abort(429)
 
-    if not instance.server.sso_auth:
+    if instance.server.bypass_sso_auth or not instance.server.sso_auth:
         return flask.abort(431)
 
     clients = instance.instance_com.clients
@@ -3388,7 +3416,7 @@ def key_ovpn_wait_post(org_id, user_id, server_id):
             if sso.check_token(client_sso_token, usr.id, svr.id):
                 authorized = True
                 break
-            time.sleep(0.1)
+            time.sleep(0.2)
 
         if not authorized:
             return flask.abort(428)
@@ -3419,6 +3447,8 @@ def key_ovpn_wait_post(org_id, user_id, server_id):
         auth_timestamp=client_auth_timestamp,
         sso_token=sso_token,
         platform=client_platform,
+        client_ver=client_ver,
+        ovpn_ver=ovpn_ver,
         device_id=client_device_id,
         device_name=client_device_name,
         mac_addr=client_mac_addr,
@@ -3646,6 +3676,8 @@ def key_wg_wait_post(org_id, user_id, server_id):
     key_data = json.loads(plaintext)
 
     client_platform = utils.filter_str(key_data['platform'])
+    client_ver = utils.filter_str(key_data.get('client_ver'))
+    ovpn_ver = utils.filter_str(key_data.get('ovpn_ver'))
     client_device_id = utils.filter_str(key_data['device_id'])
     client_device_name = utils.filter_str(key_data['device_name'])
     client_device_hostname = utils.filter_str(
@@ -3820,7 +3852,7 @@ def key_wg_wait_post(org_id, user_id, server_id):
     if not instance or instance.state != 'running':
         return flask.abort(429)
 
-    if not instance.server.sso_auth:
+    if instance.server.bypass_sso_auth or not instance.server.sso_auth:
         return flask.abort(431)
 
     if not instance.server.wg:
@@ -3834,7 +3866,7 @@ def key_wg_wait_post(org_id, user_id, server_id):
             if sso.check_token(client_sso_token, usr.id, svr.id):
                 authorized = True
                 break
-            time.sleep(0.1)
+            time.sleep(0.2)
 
         if not authorized:
             return flask.abort(428)
@@ -3882,6 +3914,8 @@ def key_wg_wait_post(org_id, user_id, server_id):
         auth_timestamp=client_auth_timestamp,
         sso_token=sso_token,
         platform=client_platform,
+        client_ver=client_ver,
+        ovpn_ver=ovpn_ver,
         device_id=client_device_id,
         device_name=client_device_name,
         mac_addr=client_mac_addr,

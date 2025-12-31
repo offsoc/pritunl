@@ -97,6 +97,9 @@ def _dict():
             'route53_zone': settings.app.route53_zone,
             'oracle_user_ocid': settings.app.oracle_user_ocid,
             'oracle_public_key': 'demo',
+            'pritunl_cloud_host': 'demo',
+            'pritunl_cloud_token': 'demo',
+            'pritunl_cloud_secret': 'demo',
             'us_east_1_access_key': 'demo',
             'us_east_1_secret_key': 'demo',
             'us_east_2_access_key': 'demo',
@@ -133,6 +136,8 @@ def _dict():
             'ap_southeast_1_secret_key': 'demo',
             'ap_southeast_2_access_key': 'demo',
             'ap_southeast_2_secret_key': 'demo',
+            'ap_southeast_3_access_key': 'demo',
+            'ap_southeast_3_secret_key': 'demo',
             'ap_east_1_access_key': 'demo',
             'ap_east_1_secret_key': 'demo',
             'ap_south_1_access_key': 'demo',
@@ -210,6 +215,9 @@ def _dict():
             'route53_zone': settings.app.route53_zone,
             'oracle_user_ocid': settings.app.oracle_user_ocid,
             'oracle_public_key': settings.app.oracle_public_key,
+            'pritunl_cloud_host': settings.app.pritunl_cloud_host,
+            'pritunl_cloud_token': settings.app.pritunl_cloud_token,
+            'pritunl_cloud_secret': settings.app.pritunl_cloud_secret,
             'us_east_1_access_key': settings.app.us_east_1_access_key,
             'us_east_1_secret_key': settings.app.us_east_1_secret_key,
             'us_east_2_access_key': settings.app.us_east_2_access_key,
@@ -260,6 +268,10 @@ def _dict():
                 settings.app.ap_southeast_2_access_key,
             'ap_southeast_2_secret_key':
                 settings.app.ap_southeast_2_secret_key,
+            'ap_southeast_3_access_key':
+                settings.app.ap_southeast_3_access_key,
+            'ap_southeast_3_secret_key':
+                settings.app.ap_southeast_3_secret_key,
             'ap_east_1_access_key':
                 settings.app.ap_east_1_access_key,
             'ap_east_1_secret_key':
@@ -978,6 +990,24 @@ def settings_put():
             settings.app.oracle_private_key = private_key
             settings.app.oracle_public_key = public_key
 
+    if settings.app.cloud_provider == 'pritunl':
+        if 'pritunl_cloud_host' in flask.request.json:
+            settings_commit = True
+            settings.app.pritunl_cloud_host = utils.filter_str(
+                flask.request.json['pritunl_cloud_host']) or None
+        if 'pritunl_cloud_token' in flask.request.json:
+            settings_commit = True
+            settings.app.pritunl_cloud_token = utils.filter_str(
+                flask.request.json['pritunl_cloud_token']) or None
+        if 'pritunl_cloud_secret' in flask.request.json:
+            settings_commit = True
+            settings.app.pritunl_cloud_secret = utils.filter_str(
+                flask.request.json['pritunl_cloud_secret']) or None
+    else:
+        settings.app.pritunl_cloud_host = None
+        settings.app.pritunl_cloud_token = None
+        settings.app.pritunl_cloud_secret = None
+
     for aws_key in (
                 'us_east_1_access_key',
                 'us_east_1_secret_key',
@@ -1015,6 +1045,8 @@ def settings_put():
                 'ap_southeast_1_secret_key',
                 'ap_southeast_2_access_key',
                 'ap_southeast_2_secret_key',
+                'ap_southeast_3_access_key',
+                'ap_southeast_3_secret_key',
                 'ap_east_1_access_key',
                 'ap_east_1_secret_key',
                 'ap_south_1_access_key',

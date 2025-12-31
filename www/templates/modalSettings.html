@@ -208,6 +208,7 @@
         <option value="none" <%= cloud_provider === 'none' ? 'selected' : '' %>>None</option>
         <option value="aws" <%= cloud_provider === 'aws' ? 'selected' : '' %>>AWS</option>
         <option value="oracle" <%= cloud_provider === 'oracle' ? 'selected' : '' %>>Oracle</option>
+        <option value="pritunl" <%= cloud_provider === 'pritunl' ? 'selected' : '' %>>Pritunl Cloud</option>
       </select>
     </div>
     <div class="sso-okta-app-id form-group" <%= !sso || sso.indexOf('okta') === -1 ? 'style="display: none;"' : '' %>>
@@ -236,18 +237,20 @@
     </div>
     <div class="sso-azure-region form-group" <%= !sso || sso.indexOf('azure') === -1 ? 'style="display: none;"' : '' %>>
       <label>Azure Region</label>
-      <select class="form-control" data-toggle="tooltip" title="Duo authentication mode">
-        <option value="" <%= !sso_azure_region ? 'selected' : '' %>>Global (Old)</option>
-        <option value="global" <%= sso_azure_region === 'global' ? 'selected' : '' %>>Global</option>
-        <option value="us-gov" <%= sso_azure_region === 'us-gov' ? 'selected' : '' %>>US Government</option>
-        <option value="china" <%= sso_azure_region === 'china' ? 'selected' : '' %>>China</option>
+      <select class="form-control" data-toggle="tooltip" title="Azure region">
+        <option value="global2" <%= sso_azure_region === 'global2' ? 'selected' : '' %>>Global (OAuth v2)</option>
+        <option value="us-gov2" <%= sso_azure_region === 'us-gov2' ? 'selected' : '' %>>US Government (OAuth v2)</option>
+        <option value="china2" <%= sso_azure_region === 'china2' ? 'selected' : '' %>>China (OAuth v2)</option>
+        <option value="global" <%= sso_azure_region === 'global' ? 'selected' : '' %>>Global (OAuth v1)</option>
+        <option value="us-gov" <%= sso_azure_region === 'us-gov' ? 'selected' : '' %>>US Government (OAuth v1)</option>
+        <option value="china" <%= sso_azure_region === 'china' ? 'selected' : '' %>>China (OAuth v1)</option>
       </select>
     </div>
     <div class="sso-azure-version form-group" <%= !sso || sso.indexOf('azure') === -1 ? 'style="display: none;"' : '' %>>
       <label>Azure API Version</label>
-      <select class="form-control" data-toggle="tooltip" title="Duo authentication mode">
-        <option value="1" <%= sso_azure_version.toString() === '1' ? 'selected' : '' %>>Azure AD Graph (Old)</option>
+      <select class="form-control" data-toggle="tooltip" title="Migrating to newer Microsoft Graph API may require changes to permissions in Azure.">
         <option value="2" <%= sso_azure_version.toString() === '2' ? 'selected' : '' %>>Microsoft Graph</option>
+        <option value="1" <%= sso_azure_version.toString() === '1' ? 'selected' : '' %>>Azure AD Graph (Legacy)</option>
       </select>
     </div>
     <div class="sso-azure-app-id form-group" <%= !sso || sso.indexOf('azure') === -1 ? 'style="display: none;"' : '' %>>
@@ -373,6 +376,7 @@
         <option value="ap-northeast-2" <%= route53_region === 'ap-northeast-2' ? 'selected' : '' %>>Asia Pacific (Seoul)</option>
         <option value="ap-southeast-1" <%= route53_region === 'ap-southeast-1' ? 'selected' : '' %>>Asia Pacific (Singapore)</option>
         <option value="ap-southeast-2" <%= route53_region === 'ap-southeast-2' ? 'selected' : '' %>>Asia Pacific (Sydney)</option>
+        <option value="ap-southeast-3" <%= route53_region === 'ap-southeast-3' ? 'selected' : '' %>>Asia Pacific (Jakarta)</option>
         <option value="ap-east-1" <%= route53_region === 'ap-east-1' ? 'selected' : '' %>>Asia Pacific (Hong Kong)</option>
         <option value="ap-south-1" <%= route53_region === 'ap-south-1' ? 'selected' : '' %>>Asia Pacific (Mumbai)</option>
         <option value="sa-east-1" <%= route53_region === 'sa-east-1' ? 'selected' : '' %>>South America (Sao Paulo)</option>
@@ -449,6 +453,10 @@
     <div class="ap-southeast-2-access-key form-group">
       <label>Asia Pacific (Sydney) Access Key</label>
       <input type="text" class="form-control" placeholder="Enter access key" data-toggle="tooltip" title="Enter access key or 'role' to use the instance IAM role" value="<%- ap_southeast_2_access_key || '' %>">
+    </div>
+    <div class="ap-southeast-3-access-key form-group">
+      <label>Asia Pacific (Jakarta) Access Key</label>
+      <input type="text" class="form-control" placeholder="Enter access key" data-toggle="tooltip" title="Enter access key or 'role' to use the instance IAM role" value="<%- ap_southeast_3_access_key || '' %>">
     </div>
     <div class="ap-east-1-access-key form-group">
       <label>Asia Pacific (Hong Kong) Access Key</label>
@@ -542,6 +550,10 @@
       <label>Asia Pacific (Sydney) Secret Key</label>
       <input type="text" class="form-control" placeholder="Enter secret key" data-toggle="tooltip" title="Enter secret key or 'role' to use the instance IAM role" value="<%- ap_southeast_2_secret_key || '' %>">
     </div>
+    <div class="ap-southeast-3-secret-key form-group">
+      <label>Asia Pacific (Jakarta) Secret Key</label>
+      <input type="text" class="form-control" placeholder="Enter secret key" data-toggle="tooltip" title="Enter secret key or 'role' to use the instance IAM role" value="<%- ap_southeast_3_secret_key || '' %>">
+    </div>
     <div class="ap-south-1-secret-key form-group">
       <label>Asia Pacific (Mumbai) Secret Key</label>
       <input type="text" class="form-control" placeholder="Enter secret key" data-toggle="tooltip" title="Enter secret key or 'role' to use the instance IAM role" value="<%- ap_south_1_secret_key || '' %>">
@@ -570,15 +582,33 @@
   </div>
 </div>
 </div>
+<div class="pritunl-settings layout-horizontal" <%= cloud_provider === 'pritunl' ? '' : 'style="display: none;"' %>>
+<div class="settings-left layout-flex left">
+  <div class="pritunl-cloud-token form-group">
+    <label>Pritunl Cloud Token</label>
+    <input type="text" class="form-control" placeholder="Enter token" data-toggle="tooltip" title="Enter the Pritunl Cloud API token" value="<%- pritunl_cloud_token || '' %>">
+  </div>
+  <div class="pritunl-cloud-host form-group">
+    <label>Pritunl Cloud Host</label>
+    <input type="text" class="form-control" placeholder="Enter hostname" data-toggle="tooltip" title="Enter the hostname of the Pritunl Cloud web console server" value="<%- pritunl_cloud_host || '' %>">
+  </div>
+</div>
+<div class="settings-right right">
+  <div class="pritunl-cloud-secret form-group">
+    <label>Pritunl Cloud Secret</label>
+    <input type="text" class="form-control" placeholder="Enter secret" data-toggle="tooltip" title="Enter the Pritunl Cloud API secret" value="<%- pritunl_cloud_secret || '' %>">
+  </div>
+</div>
+</div>
 <div class="layout-horizontal">
   <div class="settings-left layout-flex left advanced">
     <div class="email-from form-group">
       <label>SMTP From Address</label>
-      <input type="email" class="form-control" placeholder="Enter SMTP from address" value="<%- email_from || '' %>" data-toggle="tooltip" title="SMTP name and from email address (example: Pritunl <contact@pritunl.com>)">
+      <input type="email" class="form-control" placeholder="Enter SMTP from address" value="<%- email_from || '' %>" data-toggle="tooltip" title="SMTP from email address">
     </div>
     <div class="email-username form-group">
       <label>SMTP Username</label>
-      <input type="text" class="form-control" placeholder="Enter SMTP username" value="<%- email_username || '' %>">
+      <input type="text" class="form-control" placeholder="Enter SMTP username" value="<%- email_username || '' %>" data-toggle="tooltip" title="SMTP username">
     </div>
     <div class="server-cert form-group">
       <label>Server SSL Certificate</label><br>
@@ -588,11 +618,11 @@
   <div class="settings-right right advanced">
     <div class="email-server form-group">
       <label>SMTP Server</label>
-      <input type="text" class="form-control" placeholder="Enter SMTP server" value="<%- email_server || '' %>">
+      <input type="text" class="form-control" placeholder="Enter SMTP server" value="<%- email_server || '' %>" data-toggle="tooltip" title="SMTP server address and port">
     </div>
     <div class="email-password form-group">
       <label>SMTP Password</label>
-      <input type="password" class="form-control" placeholder="Enter SMTP password" value="<%- email_password %>">
+      <input type="password" class="form-control" placeholder="Enter SMTP password" value="<%- email_password %>" data-toggle="tooltip" title="SMTP password">
     </div>
     <div class="server-key form-group">
       <label>Server SSL Key</label><br>

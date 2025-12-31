@@ -32,6 +32,7 @@ import uuid
 import pymongo
 import json
 import datetime
+import random
 import nacl.public
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -64,6 +65,7 @@ class Clients(object):
             'virt_address',
         )
         self.clients_queue = collections.deque()
+        self.auths_queue = collections.deque()
         self.ip_network = ipaddress.IPv4Network(self.server.network)
 
         self.firewall_clients = docdb.DocDb(
@@ -111,6 +113,9 @@ class Clients(object):
             'user_name': client.get('user_name'),
             'device_id': client.get('device_id'),
             'device_name': client.get('device_name'),
+            'real_address': client.get('real_address'),
+            'virt_address': client.get('virt_address'),
+            'virt_address6': client.get('virt_address6'),
         }
 
     def get_org(self, org_id):
@@ -194,7 +199,9 @@ class Clients(object):
                         client_conf += 'push "redirect-gateway-ipv6 def1"\n'
                         client_conf += 'push "route-ipv6 2000::/3"\n'
 
+            has_dns = False
             if self.server.dns_mapping:
+                has_dns = True
                 client_conf += 'push "dhcp-option DNS %s"\n' % (
                     utils.get_network_gateway(self.server.network))
 
@@ -204,8 +211,12 @@ class Clients(object):
                     (settings.vpn.dns_mapping_push_all_apple and
                      platform in ('ios', 'mac')):
                 for dns_server in self.server.dns_servers:
+                    has_dns = True
                     client_conf += 'push "dhcp-option DNS %s"\n' % \
                         dns_server
+
+            if has_dns:
+                client_conf += 'push "dhcp-option DOMAIN-ROUTE ."\n'
 
             if self.server.search_domain:
                 domains = self.server.search_domain.split(',')
@@ -238,7 +249,8 @@ class Clients(object):
                             utils.parse_network(network_link)
 
             if network_links and not reauth:
-                thread = threading.Thread(target=self.iroute_ping_thread,
+                thread = threading.Thread(name="IroutePingOvpn",
+                    target=self.iroute_ping_thread,
                     args=(client_id, virt_address.split('/')[0]))
                 thread.daemon = True
                 thread.start()
@@ -317,6 +329,8 @@ class Clients(object):
             'gateway6': network_gateway6,
             'port': self.server.port_wg,
             'mtu': self.server.mss_fix,
+            'ping_interval': self.server.ping_interval_wg,
+            'ping_timeout': self.server.ping_timeout_wg,
             'web_port': settings.app.server_port,
             'web_no_ssl': not settings.app.server_ssl,
             'public_key': self.instance.wg_public_key,
@@ -331,12 +345,10 @@ class Clients(object):
         if user.link_server_id:
             pass
             # TODO wg
-            # link_usr_svr = self.server.get_link_server(user.link_server_id,
-            #     fields=('_id', 'network', 'network_start', 'network_end',
-            #         'local_networks', 'organizations', 'routes', 'links',
-            #         'ipv6'))
+            # link_usr_svr = self.server.get_link_server(user.link_server_id)
             #
-            # for route in link_usr_svr.get_routes(include_default=False):
+            # for route in link_usr_svr.get_routes(include_default=False,
+            #         include_dns_routes=False):
             #     network = route['network']
             #     metric = route.get('metric')
             #     if metric:
@@ -404,7 +416,8 @@ class Clients(object):
                         )
 
             if network_links:
-                thread = threading.Thread(target=self.iroute_ping_thread,
+                thread = threading.Thread(name="IroutePingWg",
+                    target=self.iroute_ping_thread,
                     args=(client_id, virt_address.split('/')[0]))
                 thread.daemon = True
                 thread.start()
@@ -453,7 +466,9 @@ class Clients(object):
                             'network': vxlan.get_vxlan_net6(link_svr.id),
                         })
 
-            for route in self.server.get_routes(include_default=False):
+            for route in self.server.get_routes(
+                    include_default=False,
+                    include_dns_routes=self.server.block_outside_dns):
                 network = route['network']
                 route_conf = {
                     'network': network,
@@ -524,9 +539,9 @@ class Clients(object):
             self.instance_com.push_output('Primary link available ' +
                 'over secondary, relinking %s' % network)
             if len(reconnect) > 32:
-                self.instance.disconnect_wg(reconnect)
+                self.instance.disconnect_wg(reconnect, "relink")
             else:
-                self.instance_com.client_kill(reconnect)
+                self.instance_com.client_kill(reconnect, "relink")
 
         return reserved
 
@@ -558,18 +573,18 @@ class Clients(object):
 
         for client_id in primary_reconnect:
             if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "primary_reconnect")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "primary_reconnect")
 
         if primary_reconnect:
             time.sleep(5)
 
         for client_id in secondary_reconnect:
             if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "secondary_reconnect")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "secondary_reconnect")
 
         if primary_reconnect or secondary_reconnect:
             self.instance_com.push_output('Gateway link ' +
@@ -592,7 +607,7 @@ class Clients(object):
 
         return False
 
-    def get_virt_addr(self, org_id, user_id, mac_addr, doc_id):
+    def get_virt_addr(self, org_id, user_id, mac_addr, doc_id, final=False):
         address_dynamic = False
         disconnected = set()
         subnet = '/%s' % self.ip_network.prefixlen
@@ -711,7 +726,7 @@ class Clients(object):
                     ])
 
         if not virt_address:
-            doc = self.pool_collection.find_and_modify({
+            doc = self.pool_collection.find_one_and_replace({
                 'server_id': self.server.id,
                 'user_id': None,
             }, {
@@ -720,7 +735,8 @@ class Clients(object):
                 'mac_addr': mac_addr,
                 'client_id': doc_id,
                 'timestamp': utils.now(),
-            }, new=True)
+                'static': False,
+            }, return_document=True)
 
             if doc:
                 address_dynamic = True
@@ -750,6 +766,7 @@ class Clients(object):
                                 'mac_addr': mac_addr,
                                 'client_id': doc_id,
                                 'timestamp': utils.now(),
+                                'static': False,
                             })
                             virt_address = str(ip_addr) + subnet
                             address_dynamic = True
@@ -767,6 +784,21 @@ class Clients(object):
                         }})
 
         if not virt_address:
+            if not final:
+                logger.info('Unable to assign ip address, retrying',
+                    'clients',
+                    server_id=self.server.id,
+                    instance_id=self.instance.id,
+                    user_id=user_id,
+                    multi_device=self.server.multi_device,
+                    replica_count=self.server.replica_count,
+                    network=self.server.network,
+                    user_count=self.server.user_count,
+                )
+                self.server.reset_ip_pool()
+                return self.get_virt_addr(
+                    org_id, user_id, mac_addr, doc_id, True)
+
             logger.error('Unable to assign ip address, pool full',
                 'clients',
                 server_id=self.server.id,
@@ -817,10 +849,11 @@ class Clients(object):
                         'timestamp': None,
                     }})
                 else:
-                    self.pool_collection.remove({
+                    self.pool_collection.delete_one({
                         'server_id': self.server.id,
                         'user_id': user_id,
                         'client_id': doc_id,
+                        'static': True,
                     })
                 return None, False, True
 
@@ -835,6 +868,8 @@ class Clients(object):
         device_id = client_data.get('device_id')
         device_name = client_data.get('device_name')
         platform = client_data.get('platform')
+        client_ver = client_data.get('client_ver')
+        ovpn_ver = client_data.get('ovpn_ver')
         mac_addr = client_data.get('mac_addr')
         remote_ip = client_data.get('remote_ip')
 
@@ -863,7 +898,7 @@ class Clients(object):
             }, {
                 'user': user.name,
                 'type': 'ovpn',
-                'platform': platform,
+                'platform': utils.filter_str2(platform),
                 'remote_ip': remote_ip,
             })
 
@@ -926,9 +961,11 @@ class Clients(object):
                 for clnt in self.clients.find({'user_id': user_id}):
                     time.sleep(2)
                     if len(clnt['id']) > 32:
-                        self.instance.disconnect_wg(clnt['id'])
+                        self.instance.disconnect_wg(clnt['id'],
+                            "remove_multi")
                     else:
-                        self.instance_com.client_kill(clnt['id'])
+                        self.instance_com.client_kill(clnt['id'],
+                            "remove_multi")
 
             if not virt_address:
                 self.instance_com.send_client_deny(client_id, key_id,
@@ -965,6 +1002,8 @@ class Clients(object):
                 'device_id': device_id,
                 'device_name': device_name,
                 'platform': platform,
+                'client_ver': client_ver,
+                'ovpn_ver': ovpn_ver,
                 'mac_addr': mac_addr,
                 'virt_address': virt_address,
                 'virt_address6': virt_address6,
@@ -986,6 +1025,8 @@ class Clients(object):
                     org_name=org.name,
                     user_name=user.name,
                     platform=platform,
+                    client_ver=client_ver,
+                    ovpn_ver=ovpn_ver,
                     device_id=device_id,
                     device_name=device_name,
                     virtual_ip=virt_address,
@@ -1020,9 +1061,9 @@ class Clients(object):
 
         self.instance_com.send_client_auth(client_id, key_id, client_conf)
 
-    def allow_client_wg(self, user, org, wg_public_key, platform, device_id,
-            device_name, password, mac_addr, client_public_address,
-            client_public_address6, remote_ip):
+    def allow_client_wg(self, user, org, wg_public_key, platform, client_ver,
+            ovpn_ver, device_id, device_name, password, mac_addr,
+            client_public_address, client_public_address6, remote_ip):
         try:
             user_id = user.id
             org_id = org.id
@@ -1041,7 +1082,7 @@ class Clients(object):
             }, {
                 'user': user.name,
                 'type': 'wg',
-                'platform': platform,
+                'platform': utils.filter_str2(platform),
                 'remote_ip': remote_ip,
             })
 
@@ -1052,7 +1093,7 @@ class Clients(object):
                 self.get_virt_addr(org_id, user_id, mac_addr, doc_id)
 
             if device_limit:
-                self.instance.disconnect_wg(wg_public_key)
+                self.instance.disconnect_wg(wg_public_key, "device_limit")
                 return False, 'Too many devices'
 
             if not self.server.multi_device:
@@ -1067,12 +1108,14 @@ class Clients(object):
                 for clnt in self.clients.find({'user_id': user_id}):
                     time.sleep(2)
                     if len(clnt['id']) > 32:
-                        self.instance.disconnect_wg(clnt['id'])
+                        self.instance.disconnect_wg(clnt['id'],
+                            "remove_multi_wg")
                     else:
-                        self.instance_com.client_kill(clnt['id'])
+                        self.instance_com.client_kill(clnt['id'],
+                            "remove_multi_wg")
 
             if not virt_address:
-                self.instance.disconnect_wg(wg_public_key)
+                self.instance.disconnect_wg(wg_public_key, "no_virt_address")
                 return False, 'Unable to assign ip address'
 
             virt_address = self.server.ip4to4wg(virt_address)
@@ -1107,6 +1150,8 @@ class Clients(object):
                 'device_id': device_id,
                 'device_name': device_name,
                 'platform': platform,
+                'client_ver': client_ver,
+                'ovpn_ver': ovpn_ver,
                 'mac_addr': mac_addr,
                 'virt_address': virt_address,
                 'virt_address6': virt_address6,
@@ -1129,6 +1174,8 @@ class Clients(object):
                     org_name=org.name,
                     user_name=user.name,
                     platform=platform,
+                    client_ver=client_ver,
+                    ovpn_ver=ovpn_ver,
                     device_id=device_id,
                     device_name=device_name,
                     virtual_ip=virt_address,
@@ -1167,7 +1214,7 @@ class Clients(object):
             logger.exception('Error allowing client wg connect', 'server',
                 server_id=self.server.id,
             )
-            self.instance.disconnect_wg(wg_public_key)
+            self.instance.disconnect_wg(wg_public_key, "allow_exception")
             return False, 'Error allowing client wg connect'
 
         addresses = set()
@@ -1273,6 +1320,8 @@ class Clients(object):
         user_id = client_data['user_id']
         remote_ip = client_data.get('remote_ip')
         platform = client_data.get('platform')
+        client_ver = client_data.get('client_ver')
+        ovpn_ver = client_data.get('ovpn_ver')
         device_id = client_data.get('device_id')
         device_name = client_data.get('device_name')
         username = client_data.get('username')
@@ -1363,6 +1412,8 @@ class Clients(object):
                         org_name=org.name,
                         user_name=user.name,
                         platform=platform,
+                        client_ver=client_ver,
+                        ovpn_ver=ovpn_ver,
                         device_id=device_id,
                         device_name=device_name,
                         remote_ip=remote_ip,
@@ -1396,6 +1447,8 @@ class Clients(object):
                 stage='connect',
                 remote_ip=remote_ip,
                 platform=platform,
+                client_ver=client_ver,
+                ovpn_ver=ovpn_ver,
                 device_id=device_id,
                 device_name=device_name,
                 mac_addr=mac_addr,
@@ -1424,9 +1477,9 @@ class Clients(object):
 
     def connect_wg(self, user, org, wg_public_key, auth_password,
             auth_token, auth_nonce, auth_timestamp, sso_token,
-            platform, device_id, device_name, mac_addr, mac_addrs,
-            client_public_address, client_public_address6, remote_ip,
-            connect_callback):
+            platform, client_ver, ovpn_ver, device_id, device_name, mac_addr,
+            mac_addrs, client_public_address, client_public_address6,
+            remote_ip, connect_callback):
         response = {
             'sent': False,
             'lock': threading.Lock(),
@@ -1451,7 +1504,7 @@ class Clients(object):
 
         def timeout_callback():
             if connect_callback_once(False, 'Authorization timed out'):
-                self.instance.disconnect_wg(wg_public_key)
+                self.instance.disconnect_wg(wg_public_key, "authorize_timeout")
 
         thread = threading.Timer(30, timeout_callback)
         thread.daemon = True
@@ -1466,6 +1519,8 @@ class Clients(object):
                             org=org,
                             wg_public_key=wg_public_key,
                             platform=platform,
+                            client_ver=client_ver,
+                            ovpn_ver=ovpn_ver,
                             device_id=device_id,
                             device_name=device_name,
                             password=auth_password,
@@ -1493,6 +1548,8 @@ class Clients(object):
                         org_name=org.name,
                         user_name=user.name,
                         platform=platform,
+                        client_ver=client_ver,
+                        ovpn_ver=ovpn_ver,
                         device_id=device_id,
                         device_name=device_name,
                         remote_ip=remote_ip,
@@ -1507,7 +1564,8 @@ class Clients(object):
                         wg_public_key=wg_public_key,
                     )
                 except:
-                    self.instance.disconnect_wg(wg_public_key)
+                    self.instance.disconnect_wg(wg_public_key,
+                        "authorize_exception")
 
                     try:
                         connect_callback_once(False, 'Server exception')
@@ -1528,6 +1586,8 @@ class Clients(object):
                 stage='open',
                 remote_ip=remote_ip,
                 platform=platform,
+                client_ver=client_ver,
+                ovpn_ver=ovpn_ver,
                 device_id=device_id,
                 device_name=device_name,
                 mac_addr=mac_addr,
@@ -1548,7 +1608,7 @@ class Clients(object):
             logger.exception('Error parsing client connect', 'server',
                 server_id=self.server.id,
             )
-            self.instance.disconnect_wg(wg_public_key)
+            self.instance.disconnect_wg(wg_public_key, "connect_exception")
             connect_callback_once(False, 'Error parsing client connect')
 
     def open_firewall(self, user, client_public_address,
@@ -1580,7 +1640,7 @@ class Clients(object):
 
     def open_ovpn(self, user, org, auth_password,
             auth_token, auth_nonce, auth_timestamp, sso_token, platform,
-            device_id, device_name, mac_addr, mac_addrs,
+            client_ver, ovpn_ver, device_id, device_name, mac_addr, mac_addrs,
             client_public_address, client_public_address6, remote_ip,
             connect_callback):
         response = {
@@ -1620,7 +1680,8 @@ class Clients(object):
                             remote_ip,
                         )
 
-                        if self.server.sso_auth:
+                        if not self.server.bypass_sso_auth and \
+                                self.server.sso_auth:
                             conn_sso_token = utils.rand_str(32)
 
                             tokens_collection = mongo.get_collection(
@@ -1654,6 +1715,8 @@ class Clients(object):
                         org_name=org.name,
                         user_name=user.name,
                         platform=platform,
+                        client_ver=client_ver,
+                        ovpn_ver=ovpn_ver,
                         device_id=device_id,
                         device_name=device_name,
                         remote_ip=remote_ip,
@@ -1686,6 +1749,8 @@ class Clients(object):
                 stage='open',
                 remote_ip=remote_ip,
                 platform=platform,
+                client_ver=client_ver,
+                ovpn_ver=ovpn_ver,
                 device_id=device_id,
                 device_name=device_name,
                 mac_addr=mac_addr,
@@ -2100,9 +2165,9 @@ class Clients(object):
             self.instance_com.push_output(
                 'ERROR Unknown client connected client_id=%s' % client_id)
             if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "unknown_client")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "unknown_client")
             return
 
         journal.entry(
@@ -2173,7 +2238,7 @@ class Clients(object):
                 client['virt_address'].split('/')[0])
 
         try:
-            self.collection.insert(doc)
+            self.collection.insert_one(doc)
             if self.server.route_clients:
                 messenger.publish('client', {
                     'state': True,
@@ -2198,9 +2263,9 @@ class Clients(object):
                 server_id=self.server.id,
             )
             if client['type'] == 'wg':
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "client_db_err")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "client_db_err")
             return
 
         self.clients.update_id(client_id, {
@@ -2208,6 +2273,7 @@ class Clients(object):
         })
 
         self.clients_queue.append(client_id)
+        self.auths_queue.append(client_id)
 
         if client['type'] == 'wg':
             self.instance_com.push_output(
@@ -2338,7 +2404,7 @@ class Clients(object):
         doc_id = client.get('doc_id')
         if doc_id:
             try:
-                self.collection.remove({
+                self.collection.delete_one({
                     '_id': doc_id,
                 })
             except:
@@ -2359,7 +2425,7 @@ class Clients(object):
                     'timestamp': None,
                 }})
             else:
-                self.pool_collection.remove({
+                self.pool_collection.delete_many({
                     'server_id': self.server.id,
                     'user_id': client.get('user_id'),
                     'client_id': doc_id,
@@ -2370,9 +2436,9 @@ class Clients(object):
     def disconnect_user(self, user_id):
         for client in self.clients.find({'user_id': user_id}):
             if len(client['id']) > 32:
-                self.instance.disconnect_wg(client['id'])
+                self.instance.disconnect_wg(client['id'], "disconnect")
             else:
-                self.instance_com.client_kill(client['id'])
+                self.instance_com.client_kill(client['id'], "disconnect")
 
     def disconnect_user_id(self, user_id, client_id, server_id):
         if server_id and self.server.id != server_id:
@@ -2381,9 +2447,9 @@ class Clients(object):
         for clnt in self.clients.find({'user_id': user_id}):
             if clnt.get('doc_id') == client_id:
                 if len(clnt['id']) > 32:
-                    self.instance.disconnect_wg(clnt['id'])
+                    self.instance.disconnect_wg(clnt['id'], "disconnect_id")
                 else:
-                    self.instance_com.client_kill(clnt['id'])
+                    self.instance_com.client_kill(clnt['id'], "disconnect_id")
 
     def disconnect_user_mac(self, user_id, host_id, mac_addr, server_id):
         if host_id == settings.local.host_id:
@@ -2397,9 +2463,9 @@ class Clients(object):
                     'mac_addr': mac_addr,
                 }):
             if len(clnt['id']) > 32:
-                self.instance.disconnect_wg(clnt['id'])
+                self.instance.disconnect_wg(clnt['id'], "disconnect_mac")
             else:
-                self.instance_com.client_kill(clnt['id'])
+                self.instance_com.client_kill(clnt['id'], "disconnect_mac")
 
     def reconnect_user(self, user_id, host_id, server_id):
         if host_id == settings.local.host_id:
@@ -2413,9 +2479,9 @@ class Clients(object):
                 'ignore_routes': True,
             })
             if len(client['id']) > 32:
-                self.instance.disconnect_wg(client['id'])
+                self.instance.disconnect_wg(client['id'], "reconnect")
             else:
-                self.instance_com.client_kill(client['id'])
+                self.instance_com.client_kill(client['id'], "reconnect")
 
     def send_event(self):
         for org_id in self.server.organizations:
@@ -2469,12 +2535,15 @@ class Clients(object):
                 self.instance_com.push_output(
                     'Gateway link timeout on %s' % virt_address)
                 if len(client_id) > 32:
-                    self.instance.disconnect_wg(client_id)
+                    self.instance.disconnect_wg(client_id, "link_ping_err")
                 else:
-                    self.instance_com.client_kill(client_id)
+                    self.instance_com.client_kill(client_id, "link_ping_err")
                 break
 
-    def _auth_check_thread(self, client):
+    def _auth_check(self, client):
+        if not settings.app.sso_connection_check:
+            return
+
         client_id = client['id']
 
         org = self.get_org(client['org_id'])
@@ -2491,27 +2560,30 @@ class Clients(object):
                 user_id=client['user_id'],
             )
             if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "auth_lost_err")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "auth_lost_err")
             return
 
-        if usr.bypass_secondary or settings.vpn.stress_test:
+        if self.server.bypass_sso_auth or usr.bypass_secondary:
             return
 
         if not usr.sso_auth_check(self.server, client['password'],
-                client['real_address'], True):
-            logger.error('User failed auth update check',
-                'server',
-                server_id=self.server.id,
-                instance_id=self.instance.id,
-                user_id=client['user_id'],
-            )
-            if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
-            else:
-                self.instance_com.client_kill(client_id)
-            return
+                client['real_address'], True, True):
+            time.sleep(0.3)
+            if not usr.sso_auth_check(self.server, client['password'],
+                    client['real_address'], True, True):
+                logger.error('User failed auth update check',
+                    'server',
+                    server_id=self.server.id,
+                    instance_id=self.instance.id,
+                    user_id=client['user_id'],
+                )
+                if len(client_id) > 32:
+                    self.instance.disconnect_wg(client_id, "auth_update_err")
+                else:
+                    self.instance_com.client_kill(client_id, "auth_update_err")
+                return
 
         if not self.server.check_groups(usr.groups) and \
                 usr.type != CERT_SERVER:
@@ -2522,27 +2594,82 @@ class Clients(object):
                 user_id=client['user_id'],
             )
             if len(client_id) > 32:
-                self.instance.disconnect_wg(client_id)
+                self.instance.disconnect_wg(client_id, "auth_group_err")
             else:
-                self.instance_com.client_kill(client_id)
+                self.instance_com.client_kill(client_id, "auth_group_err")
             return
 
-    def auth_check(self, client):
-        if not settings.app.sso_connection_check:
-            return
+    @interrupter
+    def auth_thread(self):
+        while True:
+            try:
+                try:
+                    client_id = self.auths_queue.popleft()
+                except IndexError:
+                    if self.interrupter_sleep(10):
+                        return
+                    continue
 
-        if time.time() - client['auth_check_timestamp'] < \
-                settings.app.sso_connection_check_ttl:
-            return
+                client = self.clients.find_id(client_id)
+                if not client:
+                    continue
 
-        self.clients.update_id(client['id'], {
-            'auth_check_timestamp': time.time(),
-        })
+                diff = settings.app.sso_connection_check_ttl - \
+                        (time.time() - client['auth_check_timestamp'])
 
-        thread = threading.Thread(
-            target=self._auth_check_thread, args=(client,))
-        thread.daemon = True
-        thread.start()
+                if diff > settings.app.sso_connection_check_ttl:
+                    logger.error('Client auth time diff out of range',
+                        'server',
+                        time_diff=diff,
+                        server_id=self.server.id,
+                        instance_id=self.instance.id,
+                    )
+                    if self.interrupter_sleep(10):
+                        return
+                elif diff > 1:
+                    if self.interrupter_sleep(diff):
+                        return
+
+                if self.instance.sock_interrupt:
+                    return
+
+                client = self.clients.find_id(client_id)
+                if not client:
+                    continue
+
+                time.sleep(settings.app.sso_connection_check_rate / 1000)
+
+                self.clients.update_id(client['id'], {
+                    'auth_check_timestamp': time.time(),
+                })
+
+                try:
+                    self._auth_check(client)
+                except:
+                    logger.exception('Failed to update client',
+                        'server',
+                        server_id=self.server.id,
+                        instance_id=self.instance.id,
+                    )
+                    yield interrupter_sleep(1)
+                    continue
+                finally:
+                    self.auths_queue.append(client_id)
+
+                yield
+                if self.instance.sock_interrupt:
+                    return
+            except GeneratorExit:
+                raise
+            except:
+                logger.exception('Error in auth thread', 'server',
+                    server_id=self.server.id,
+                    instance_id=self.instance.id,
+                )
+                yield interrupter_sleep(3)
+                if self.instance.sock_interrupt:
+                    return
+                time.sleep(1)
 
     @interrupter
     def ping_thread(self):
@@ -2576,6 +2703,10 @@ class Clients(object):
                         if self.interrupter_sleep(diff):
                             return
 
+                    client = self.clients.find_id(client_id)
+                    if not client:
+                        continue
+
                     if self.instance.sock_interrupt:
                         return
 
@@ -2586,11 +2717,11 @@ class Clients(object):
                             'Client session timeout ' +
                             'user_id=%s' % client['user_id'])
                         if len(client_id) > 32:
-                            self.instance.disconnect_wg(client_id)
+                            self.instance.disconnect_wg(client_id,
+                                "session_limit")
                         else:
-                            self.instance_com.client_kill(client_id)
-
-                    self.auth_check(client)
+                            self.instance_com.client_kill(client_id,
+                                "session_limit")
 
                     try:
                         updated = self.clients.update_id(client_id, {
@@ -2602,7 +2733,8 @@ class Clients(object):
                         if client['type'] == 'wg' and \
                                 time.time() - client['timestamp_wg'] > \
                                 self.server.ping_timeout_wg:
-                            self.instance.disconnect_wg(client_id)
+                            self.instance.disconnect_wg(client_id,
+                                "ping_timeout")
                             continue
 
                         response = self.collection.update_one({
@@ -2619,9 +2751,11 @@ class Clients(object):
                                 client_id=client['doc_id'],
                             )
                             if len(client_id) > 32:
-                                self.instance.disconnect_wg(client_id)
+                                self.instance.disconnect_wg(client_id,
+                                    "ping_lost_err")
                             else:
-                                self.instance_com.client_kill(client_id)
+                                self.instance_com.client_kill(client_id,
+                                    "ping_lost_err")
                             continue
 
                         if self.server.multi_device:
@@ -2639,9 +2773,11 @@ class Clients(object):
                                     client_id=client['doc_id'],
                                 )
                                 if len(client_id) > 32:
-                                    self.instance.disconnect_wg(client_id)
+                                    self.instance.disconnect_wg(client_id,
+                                        "ping_pool_err")
                                 else:
-                                    self.instance_com.client_kill(client_id)
+                                    self.instance_com.client_kill(client_id,
+                                        "ping_pool_err")
                                 continue
                     except:
                         self.clients_queue.append(client_id)
@@ -2676,7 +2812,7 @@ class Clients(object):
                     doc_ids.append(doc_id)
 
             try:
-                self.collection.remove({
+                self.collection.delete_one({
                     '_id': {'$in': doc_ids},
                 })
             except:
@@ -2770,13 +2906,11 @@ class Clients(object):
                         pass
                     utils.del_route(virt_address)
 
-                if not host_address or \
-                        host_address == settings.local.host.local_addr or \
-                        host_address == self.route_addr:
-                    return
-
-                self.client_routes.add(virt_address)
-                utils.add_route(virt_address, host_address)
+                if host_address and \
+                        host_address != settings.local.host.local_addr and \
+                        host_address != self.route_addr:
+                    self.client_routes.add(virt_address)
+                    utils.add_route(virt_address, host_address)
             except:
                 logger.exception('Failed to add route', 'clients',
                     virt_address=virt_address,
@@ -2796,13 +2930,11 @@ class Clients(object):
                         pass
                     utils.del_route6(virt_address6)
 
-                if not host_address6 or \
-                        host_address6 == settings.local.host.local_addr6 or \
-                        host_address6 == self.route_addr6:
-                    return
-
-                self.client_routes6.add(virt_address6)
-                utils.add_route6(virt_address6, host_address6)
+                if host_address6 and \
+                        host_address6 != settings.local.host.local_addr6 and \
+                        host_address6 != self.route_addr6:
+                    self.client_routes6.add(virt_address6)
+                    utils.add_route6(virt_address6, host_address6)
             except:
                 logger.exception('Failed to add route6', 'clients',
                     virt_address=virt_address,
@@ -2841,7 +2973,7 @@ class Clients(object):
                         self.link_routes6.remove(network_link)
                     except KeyError:
                         pass
-                    utils.del_route(network_link)
+                    utils.del_route6(network_link)
 
                 self.link_routes6.add(network_link)
                 utils.add_route6(
@@ -2849,7 +2981,7 @@ class Clients(object):
                     host_address6.split('/')[0],
                 )
             else:
-                if network_link in self.link_routes6:
+                if network_link in self.link_routes:
                     try:
                         self.link_routes.remove(network_link)
                     except KeyError:
@@ -2930,7 +3062,7 @@ class Clients(object):
         self.call_queue.start(settings.vpn.call_queue_threads)
 
         if self.server.route_clients:
-            thread = threading.Thread(target=self.init_routes)
+            thread = threading.Thread(name="InitRoutes", target=self.init_routes)
             thread.daemon = True
             thread.start()
 

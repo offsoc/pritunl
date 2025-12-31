@@ -33,6 +33,7 @@ class Host(mongo.MongoObject):
         'public_address',
         'local_address',
         'address6',
+        'wg_public_key',
         'version',
     }
     fields_default = {
@@ -47,8 +48,8 @@ class Host(mongo.MongoObject):
             hosts_hist_timestamp=None, timeout=None,
             priority=None, backoff=None, backoff_timestamp=None,
             ping_timestamp_ttl=None, static=None, public_address=None,
-            local_address=None, address6=None, version=None,
-            tunnels=None, **kwargs):
+            local_address=None, address6=None, wg_public_key=None,
+            version=None, tunnels=None, **kwargs):
         mongo.MongoObject.__init__(self)
 
         self.link = link
@@ -110,6 +111,9 @@ class Host(mongo.MongoObject):
 
         if address6 is not None:
             self.address6 = address6
+
+        if wg_public_key is not None:
+            self.wg_public_key = wg_public_key
 
         if version is not None:
             self.version = version
@@ -265,6 +269,8 @@ class Host(mongo.MongoObject):
         response = self.collection.update_one({
             '_id': self.id,
             'status': AVAILABLE,
+            'active': False,
+            'active': {'$ne': False},
         }, {'$set': {
             'active': True,
         }})
@@ -317,7 +323,7 @@ class Host(mongo.MongoObject):
             seconds=self.timeout or settings.vpn.link_timeout)
         self.commit(('public_address', 'address6', 'local_address',
             'version', 'status', 'timestamp', 'hosts', 'hosts_hist',
-            'hosts_hist_timestamp', 'ping_timestamp_ttl'))
+            'wg_public_key', 'hosts_hist_timestamp', 'ping_timestamp_ttl'))
 
         if not self.link.key:
             self.link.generate_key()
@@ -328,6 +334,8 @@ class Host(mongo.MongoObject):
         hosts = {}
         state = {
             'id': self.id,
+            'protocol': self.link.protocol,
+            'wg_port': self.link.wg_port,
             'ipv6': self.link.ipv6,
             'action': self.link.action,
             'type': self.location.type,
@@ -370,6 +378,7 @@ class Host(mongo.MongoObject):
                         'right': active_host.address6 \
                             if self.link.ipv6 else \
                             active_host.public_address,
+                        'wg_public_key': active_host.wg_public_key,
                         'left_subnets': left_subnets,
                         'right_subnets': right_subnets,
                     })
@@ -432,6 +441,7 @@ class Host(mongo.MongoObject):
                         'right': active_host.address6 \
                             if self.link.ipv6 else \
                             active_host.public_address,
+                        'wg_public_key': active_host.wg_public_key,
                         'left_subnets': left_subnets,
                         'right_subnets': right_subnets,
                     })
@@ -505,6 +515,7 @@ class Host(mongo.MongoObject):
                     'pre_shared_key': self.link.key,
                     'right': active_host.address6 \
                         if self.link.ipv6 else active_host.public_address,
+                    'wg_public_key': active_host.wg_public_key,
                     'left_subnets': left_subnets,
                     'right_subnets': right_subnets,
                 })
@@ -562,6 +573,7 @@ class Host(mongo.MongoObject):
                         'pre_shared_key': self.link.key,
                         'right': host.address6 \
                             if self.link.ipv6 else host.public_address,
+                        'wg_public_key': host.wg_public_key,
                         'left_subnets': left_subnets,
                         'right_subnets': right_subnets,
                     })
@@ -773,6 +785,8 @@ class Location(mongo.MongoObject):
             'id': self.id,
             'name': self.name,
             'type': self.type,
+            'protocol': self.link.protocol,
+            'wg_port': self.link.wg_port,
             'ipv6': self.link.ipv6,
             'link_id': self.link_id,
             'link_type': self.link.type,
@@ -790,7 +804,7 @@ class Location(mongo.MongoObject):
         }
 
     def remove(self):
-        Host.collection.remove({
+        Host.collection.delete_many({
             'location_id': self.id,
         })
         mongo.MongoObject.remove(self)
@@ -892,35 +906,56 @@ class Location(mongo.MongoObject):
         if hst:
             return hst
 
-        doc = Host.collection.find_one({
+        active_doc = Host.collection.find_one({
             'location_id': self.id,
             'status': AVAILABLE,
             'active': True,
         })
 
-        if doc:
-            return Host(link=self.link, location=self, doc=doc)
-
         cursor = Host.collection.find({
             'location_id': self.id,
             'status': AVAILABLE,
             'active': False,
-        }, {
-            '_id': True,
-            'backoff': True,
-            'backoff_timestamp': True,
-        }).sort('priority', pymongo.DESCENDING).limit(1)
+        }).sort('priority', pymongo.DESCENDING)
 
         doc = None
+        backoff_doc = None
         for doc in cursor:
             if is_backoff(doc):
+                if not backoff_doc:
+                    backoff_doc = doc
                 doc = None
-                continue
-            break
+            else:
+                break
+
+        if active_doc and doc:
+            doc_id = doc['_id']
+            active_doc_id = active_doc['_id']
+            if doc_id != active_doc_id and \
+                    doc.get('priority', 0) > active_doc.get('priority', 0):
+
+                response = Host.collection.update_one({
+                    '_id': doc_id,
+                    'status': AVAILABLE,
+                    'active': False,
+                }, {'$set': {
+                    'active': True,
+                }})
+                if bool(response.modified_count):
+                    Host.collection.update_many({
+                        '_id': {'$ne': doc_id},
+                        'location_id': self.id,
+                    }, {'$set': {
+                        'active': False,
+                    }})
+
+                return Host(link=self.link, location=self, doc=doc)
+
+        if active_doc:
+             return Host(link=self.link, location=self, doc=active_doc)
 
         if not doc:
-            for doc in cursor:
-                break
+            doc = backoff_doc
 
         if not doc:
             doc = Host.collection.find_one({
@@ -991,7 +1026,10 @@ class Location(mongo.MongoObject):
                         hosts_state_total += 1
                         if host_status['state']:
                             hosts_state_available += 1
-                    doc_hosts = hosts_state_available / hosts_state_total
+                    if hosts_state_total != 0:
+                        doc_hosts = hosts_state_available / hosts_state_total
+                    else:
+                        doc_hosts = 0
 
                     if doc['active']:
                         if doc_hosts != cur_doc_hosts:
@@ -1114,6 +1152,8 @@ class Link(mongo.MongoObject):
         'key',
         'excludes',
         'ipv6',
+        'protocol',
+        'wg_port',
         'host_check',
         'action',
         'preferred_ike',
@@ -1121,6 +1161,7 @@ class Link(mongo.MongoObject):
         'force_preferred',
     }
     fields_default = {
+        'protocol': 'ipsec',
         'type': SITE_TO_SITE,
         'status': OFFLINE,
         'action': RESTART,
@@ -1128,8 +1169,8 @@ class Link(mongo.MongoObject):
     }
 
     def __init__(self, name=None, type=None, status=None, timeout=None,
-            key=None, ipv6=None, host_check=None, action=None,
-            preferred_ike=None, preferred_esp=None,
+            key=None, ipv6=None, protocol=None, wg_port=None, host_check=None,
+            action=None, preferred_ike=None, preferred_esp=None,
             force_preferred=None, **kwargs):
         mongo.MongoObject.__init__(self)
 
@@ -1150,6 +1191,12 @@ class Link(mongo.MongoObject):
 
         if ipv6 is not None:
             self.ipv6 = ipv6
+
+        if protocol is not None:
+            self.protocol = protocol
+
+        if wg_port is not None:
+            self.wg_port = wg_port
 
         if host_check is not None:
             self.host_check = host_check
@@ -1184,6 +1231,8 @@ class Link(mongo.MongoObject):
             'name': self.name,
             'type': self.type,
             'ipv6': self.ipv6,
+            'protocol': self.protocol,
+            'wg_port': self.wg_port,
             'host_check': self.host_check,
             'action': self.action,
             'status': self.status,
@@ -1193,10 +1242,10 @@ class Link(mongo.MongoObject):
         }
 
     def remove(self):
-        self.host_collection.remove({
+        self.host_collection.delete_many({
             'link_id': self.id,
         })
-        self.location_collection.remove({
+        self.location_collection.delete_many({
             'link_id': self.id,
         })
         mongo.MongoObject.remove(self)

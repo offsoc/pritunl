@@ -35,6 +35,7 @@ class Host(mongo.MongoObject):
         'auto_local_address6',
         'local_networks',
         'availability_group',
+        'priority',
     }
     fields_default = {
         'status': OFFLINE,
@@ -141,6 +142,7 @@ class Host(mongo.MongoObject):
             'local_address6': self.local_address6,
             'local_addr6': self.local_addr6,
             'availability_group': self.availability_group,
+            'priority': self.priority,
         }
 
     def iter_servers(self, fields=None):
@@ -186,7 +188,7 @@ class Host(mongo.MongoObject):
         raise ValueError('No orgs exists in link server')
 
     def remove_link_user(self):
-        self.user_collection.remove({
+        self.user_collection.delete_one({
             'resource_id': self.id,
         })
 
@@ -204,7 +206,7 @@ class Host(mongo.MongoObject):
         if send_event:
             event.Event(type=SERVERS_UPDATED)
 
-        self.user_collection.remove({
+        self.user_collection.delete_one({
             'resource_id': self.id,
         })
         mongo.MongoObject.remove(self)

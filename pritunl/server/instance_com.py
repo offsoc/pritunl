@@ -10,6 +10,7 @@ from pritunl import clients
 from pritunl import ipaddress
 from pritunl import monitoring
 from pritunl import database
+from pritunl import plugins
 
 import os
 import time
@@ -48,8 +49,9 @@ class ServerInstanceCom(object):
         finally:
             self.sock_lock.release()
 
-    def client_kill(self, client_id):
+    def client_kill(self, client_id, reason=""):
         self.clients.disconnected(client_id)
+        self.push_output('client-kill "%s"' % reason)
         self.sock_send('client-kill %s\n' % client_id)
 
     def send_client_auth(self, client_id, key_id, client_conf):
@@ -135,12 +137,16 @@ class ServerInstanceCom(object):
                         self.client['device_id'] = uuid.uuid4().hex
                         self.client['device_name'] = 'chrome-os'
                     self.client['platform'] = utils.filter_str(env_val)
+                elif env_key == 'IV_VER':
+                    self.client['ovpn_ver'] = utils.filter_str(env_val)
                 elif env_key == 'UV_ID':
                     self.client['device_id'] = utils.filter_str(env_val)
                 elif env_key == 'UV_NAME':
                     self.client['device_name'] = utils.filter_str(env_val)
                 elif env_key == 'UV_PLATFORM':
                     self.client['platform'] = utils.filter_str(env_val)
+                elif env_key == 'UV_PRITUNL_VER':
+                    self.client['client_ver'] = utils.filter_str(env_val)
                 elif env_key == 'username':
                     self.client['username'] = utils.filter_str(env_val)[:128]
                 elif env_key == 'password':
@@ -224,17 +230,28 @@ class ServerInstanceCom(object):
             if len(msg) > 3:
                 server_id = msg[3]
             self.clients.reconnect_user(user_id, host_id, server_id)
-        elif event_type == 'route_advertisement':
+        elif event_type == 'route_advertisement2':
             server_id = msg[1]
             vpc_region = msg[2]
             vpc_id = msg[3]
-            network = msg[4]
+            networks = msg[4]
 
             if server_id != self.server.id:
                 return
 
             self.instance.reserve_route_advertisement(
-                vpc_region, vpc_id, network)
+                vpc_region, vpc_id, networks)
+        elif event_type == 'route_advertised':
+            server_id = msg[1]
+            vxlan_addr = msg[2]
+            vxlan_addr6 = msg[3]
+            networks = msg[4]
+
+            if server_id != self.server.id:
+                return
+
+            for network in networks:
+                self.instance.tables_add(vxlan_addr, vxlan_addr6, network)
 
     @interrupter
     def _watch_thread(self):
@@ -263,12 +280,34 @@ class ServerInstanceCom(object):
                                 'org_name': client.get('org_name'),
                                 'user_id': client.get('user_id'),
                                 'user_name': client.get('user_name'),
-                                'device_id': client.get('device_id'),
-                                'device_name': client.get('device_name'),
+                                'device_id': utils.filter_str2(
+                                    client.get('device_id')),
+                                'device_name': utils.filter_str2(
+                                    client.get('device_name')),
                             }, {
                                 'bytes_sent': bytes_sent,
                                 'bytes_recv': bytes_recv,
                             })
+
+                            plugins.event(
+                                'user_bandwidth',
+                                host_id=settings.local.host.id,
+                                host_name=settings.local.host.name,
+                                server_id=self.server.id,
+                                server_name=self.server.name,
+                                org_id=client.get('org_id'),
+                                org_name=client.get('org_name'),
+                                user_id=client.get('user_id'),
+                                user_name=client.get('user_name'),
+                                device_id=client.get('device_id'),
+                                device_name=client.get('device_name'),
+                                remote_ip=client.get('real_address'),
+                                virtual_ip=client.get('virt_address'),
+                                virtual_ip6=client.get('virt_address6'),
+                                timestamp=self.cur_timestamp,
+                                bytes_sent=bytes_sent,
+                                bytes_recv=bytes_recv,
+                            )
 
                 self.bytes_lock.acquire()
                 bytes_recv = self.bytes_recv
@@ -404,21 +443,24 @@ class ServerInstanceCom(object):
         self.sock.connect(self.socket_path)
 
     def start(self):
-        thread = threading.Thread(target=self._socket_thread)
+        thread = threading.Thread(name="ServerSocket",
+            target=self._socket_thread)
         thread.daemon = True
         thread.start()
 
-        thread = threading.Thread(target=self._watch_thread)
+        thread = threading.Thread(name="ServerWatch",
+            target=self._watch_thread)
         thread.daemon = True
         thread.start()
 
-        thread = threading.Thread(target=self.clients.ping_thread)
+        thread = threading.Thread(name="ServerPing",
+            target=self.clients.ping_thread)
+        thread.daemon = True
+        thread.start()
+
+        thread = threading.Thread(name="ServerAuth",
+            target=self.clients.auth_thread)
         thread.daemon = True
         thread.start()
 
         self.clients.start()
-
-        if settings.vpn.stress_test:
-            thread = threading.Thread(target=self._stress_thread)
-            thread.daemon = True
-            thread.start()

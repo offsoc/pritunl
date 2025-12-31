@@ -45,6 +45,9 @@ class ServerInstance(object):
         self.clean_exit = False
         self.interface = None
         self.interface_wg = None
+        self.table = None
+        self.tables_active = set()
+        self.table_lock = threading.Lock()
         self.wg_started = False
         self.wg_private_key = None
         self.wg_public_key = None
@@ -87,19 +90,28 @@ class ServerInstance(object):
             return True
         return self.sock_interrupt
 
-    def publish(self, message, transaction=None, extra=None):
+    def publish(self, message, extra=None):
         extra = extra or {}
         extra.update({
             'server_id': self.server.id,
         })
-        messenger.publish('servers', message,
-            extra=extra, transaction=transaction)
+        messenger.publish('servers', message, extra=extra)
 
-    def subscribe(self, cursor_id=None, timeout=None):
-        for msg in messenger.subscribe('servers', cursor_id=cursor_id,
-                timeout=timeout):
-            if msg.get('server_id') == self.server.id:
-                yield msg
+    def subscribe(self, cursor_id=None):
+        while True:
+            if self.interrupt:
+                return
+
+            for msg in messenger.subscribe('servers',
+                    cursor_id=cursor_id, timeout=60):
+                if self.interrupt:
+                    return
+
+                cursor_id = msg['_id']
+                if msg.get('server_id') == self.server.id:
+                    yield msg
+
+            time.sleep(0.1)
 
     def resources_acquire(self):
         if self.interface:
@@ -134,6 +146,7 @@ class ServerInstance(object):
         self.interface = utils.interface_acquire(self.server.adapter_type)
         if self.server.wg:
             self.interface_wg = utils.interface_acquire('wg')
+        self.table = utils.interface_acquire('table')
 
     def resources_release(self):
         interface = self.interface
@@ -144,6 +157,10 @@ class ServerInstance(object):
         if interface_wg:
             utils.interface_release('wg', interface_wg)
             self.interface_wg = None
+        table = self.table
+        if table:
+            utils.interface_release('table', table)
+            self.table = None
 
         _instances_lock.acquire()
         try:
@@ -151,6 +168,135 @@ class ServerInstance(object):
                 _instances.pop(self.server.id)
         finally:
             _instances_lock.release()
+
+    def tables_add(self, vxlan_addr, vxlan_addr6, network):
+        if ':' in network:
+            if vxlan_addr6 == self.vxlan.vxlan_addr6:
+                return
+        else:
+            if vxlan_addr == self.vxlan.vxlan_addr:
+                return
+
+        self.table_lock.acquire()
+        try:
+            if not self.tables_active:
+                self._tables_clear()
+
+            if network not in self.tables_active:
+                if ':' in network:
+                    utils.Process(
+                        ['ip', '-6', 'rule', 'add', 'table', self.table,
+                            'from', network],
+                    ).run(5)
+                else:
+                    utils.Process(
+                        ['ip', 'rule', 'add', 'table', self.table,
+                            'from', network],
+                    ).run(5)
+                self.tables_active.add(network)
+
+            for route in self.table_routes:
+                if ':' in route:
+                    utils.Process(
+                        ['ip', '-6', 'route', 'replace', 'table', self.table,
+                            route, 'via', vxlan_addr6],
+                        ignore_states=['File exists'],
+                    ).run(5)
+                else:
+                    utils.Process(
+                        ['ip', 'route', 'replace', 'table', self.table,
+                            route, 'via', vxlan_addr],
+                        ignore_states=['File exists'],
+                    ).run(5)
+        except:
+            logger.exception('Failed to add table rule', 'server',
+                server_id=self.server.id,
+                instance_id=self.id,
+                vxlan_addr=vxlan_addr,
+                vxlan_addr6=vxlan_addr6,
+                network=network,
+            )
+        finally:
+            self.table_lock.release()
+
+    def tables_del(self, network):
+        self.table_lock.acquire()
+        try:
+            if ':' in network:
+                utils.Process(
+                    ['ip', '-6', 'rule', 'del', 'from', network],
+                    ignore_states=['No such file'],
+                ).run(5)
+            else:
+                utils.Process(
+                    ['ip', 'rule', 'del', 'from', network],
+                    ignore_states=['No such file'],
+                ).run(5)
+            try:
+                self.tables_active.remove(network)
+            except KeyError:
+                pass
+        finally:
+            self.table_lock.release()
+
+    def _tables_clear(self, networks=None):
+        clear_networks = self.tables_active.copy()
+        clear_networks.add(self.server.network)
+        if self.server.ipv6:
+            clear_networks.add(self.server.network6)
+        if self.server.wg:
+            clear_networks.add(self.server.network_wg)
+            if self.server.ipv6:
+                clear_networks.add(self.server.network6_wg)
+
+        if networks:
+            for network in networks:
+                clear_networks.add(network)
+
+        for network in clear_networks:
+            try:
+                for i in range(3):
+                    if ':' in network:
+                        proc = utils.Process(
+                            ['ip', '-6', 'rule', 'del', 'from', network],
+                            ignore_states=['No such file'],
+                        )
+                    else:
+                        proc = utils.Process(
+                            ['ip', 'rule', 'del', 'from', network],
+                            ignore_states=['No such file'],
+                        )
+
+                    proc.run(5)
+                    if proc.return_code() != 0:
+                        break
+            except:
+                pass
+
+        try:
+            utils.Process(
+                ['ip', 'route', 'flush', 'table', self.table],
+                ignore_states=['does not exist'],
+            ).run(5)
+        except:
+            pass
+
+        try:
+            utils.Process(
+                ['ip', '-6', 'route', 'flush', 'table', self.table],
+                ignore_states=['does not exist'],
+            ).run(5)
+        except:
+            pass
+
+        self.tables_active = set()
+
+    def tables_clear(self, networks=None):
+        self.table_lock.acquire()
+        try:
+            self._tables_clear(networks=networks)
+        finally:
+            self.table_lock.release()
 
     def generate_ovpn_conf(self):
         if not self.server.primary_organization or \
@@ -181,7 +327,8 @@ class ServerInstance(object):
 
         push = ''
         routes = []
-        for route in self.server.get_routes(include_default=False):
+        for route in self.server.get_routes(include_default=False,
+                include_dns_routes=self.server.block_outside_dns):
             network = route['network']
 
             routes.append(route['network'])
@@ -292,7 +439,10 @@ class ServerInstance(object):
             raise ValueError('Unknown protocol')
 
         if utils.check_openvpn_ver():
-            server_ciphers = SERVER_CIPHERS
+            if self.server.ovpn_dco:
+                server_ciphers = SERVER_CIPHERS_DCO
+            else:
+                server_ciphers = SERVER_CIPHERS
             server_conf_template = OVPN_INLINE_SERVER_CONF
         else:
             server_ciphers = SERVER_CIPHERS_OLD
@@ -351,9 +501,16 @@ class ServerInstance(object):
             server_conf += 'max-routes-per-client %s\n' % \
                 settings.vpn.max_routes_per_client
 
+        if self.server.tun_mtu:
+            server_conf += 'tun-mtu %s\n' % self.server.tun_mtu
+
         if self.server.mss_fix:
             server_conf += 'mssfix %s\n' % self.server.mss_fix
-            server_conf += 'tun-mtu %s\n' % self.server.mss_fix
+            server_conf += 'push "mssfix %s"\n' % self.server.mss_fix
+
+        if self.server.fragment:
+            server_conf += 'fragment %s\n' % self.server.fragment
+            server_conf += 'push "fragment %s"\n' % self.server.fragment
 
         if self.server.multihome:
             server_conf += 'multihome\n'
@@ -374,9 +531,8 @@ class ServerInstance(object):
         else:
             server_conf += 'ignore-unknown-option allow-compression\n'
             server_conf += 'allow-compression no\n'
-            server_conf += 'comp-lzo no\npush "comp-lzo no"\n'
-
-        server_conf += JUMBO_FRAMES[self.server.jumbo_frames]
+            if not self.server.ovpn_dco:
+                server_conf += 'comp-lzo no\npush "comp-lzo no"\n'
 
         if push:
             server_conf += push
@@ -395,18 +551,19 @@ class ServerInstance(object):
                 host_name=settings.local.host.name,
                 server_id=self.server.id,
                 server_name=self.server.name,
+                wg=self.server.wg,
                 port=self.server.port,
+                port_wg=self.server.port_wg,
                 protocol=self.server.protocol,
                 ipv6=self.server.ipv6,
                 ipv6_firewall=self.server.ipv6_firewall,
                 network=self.server.network,
                 network6=self.server.network6,
+                network_wg=self.server.network_wg,
+                network6_wg=self.server.network6_wg,
                 network_mode=self.server.network_mode,
                 network_start=self.server.network_start,
                 network_stop=self.server.network_end,
-                dynamic_firewall=self.server.dynamic_firewall,
-                route_dns=self.server.route_dns,
-                device_auth=self.server.device_auth,
                 restrict_routes=self.server.restrict_routes,
                 bind_address=self.server.bind_address,
                 onc_hostname=None,
@@ -420,17 +577,19 @@ class ServerInstance(object):
                 inter_client=self.server.inter_client,
                 ping_interval=self.server.ping_interval,
                 ping_timeout=self.server.ping_timeout,
+                ping_interval_wg=self.server.ping_interval_wg,
+                ping_timeout_wg=self.server.ping_timeout_wg,
                 link_ping_interval=self.server.link_ping_interval,
                 link_ping_timeout=self.server.link_ping_timeout,
-                allowed_devices=self.server.allowed_devices,
                 max_clients=self.server.max_clients,
                 replica_count=self.server.replica_count,
                 dns_mapping=self.server.dns_mapping,
                 debug=self.server.debug,
-                routes=routes,
                 interface=self.interface,
+                interface_wg=self.interface_wg,
                 bridge_interface=self.bridge_interface,
                 vxlan=self.vxlan,
+                routes=routes,
             )
 
             if returns:
@@ -438,6 +597,9 @@ class ServerInstance(object):
                     if not return_val:
                         continue
                     server_conf += return_val.strip() + '\n'
+
+        self.server.generate_ca_cert()
+        self.server.commit('ca_certificate')
 
         server_conf += '<ca>\n%s\n</ca>\n' % self.server.ca_certificate
 
@@ -488,9 +650,39 @@ class ServerInstance(object):
                 self.interface,
             )
         except BridgeLookupError:
-            self.server.output.push_output(
+            self.server.output.push_message(
                 'ERROR Failed to find bridged network interface')
             raise
+
+    def bridge_up(self):
+        if self.server.network_mode != BRIDGE:
+            return
+
+        time.sleep(1)
+
+        try:
+            utils.check_output_logged([
+                'ip',
+                'link',
+                'set',
+                'up',
+                self.interface,
+            ])
+        except BridgeLookupError:
+            time.sleep(1)
+
+            try:
+                utils.check_output_logged([
+                    'ip',
+                    'link',
+                    'set',
+                    'up',
+                    self.interface,
+                ])
+            except BridgeLookupError:
+                self.server.output.push_message(
+                    'ERROR Failed to bring up bridge interface')
+                raise
 
     def bridge_stop(self):
         if self.server.network_mode != BRIDGE:
@@ -594,10 +786,12 @@ class ServerInstance(object):
                     'Failed to find default IPv6 network interface')
         routes6.reverse()
 
+        table_routes = []
         for route in self.server.get_routes(
                     include_hidden=True,
                     include_server_links=True,
                     include_default=True,
+                    include_dns_routes=True,
                 ):
             if route['virtual_network'] or route['link_virtual_network']:
                 self.iptables.add_nat_network(route['network'])
@@ -661,6 +855,9 @@ class ServerInstance(object):
                     nat=False,
                 )
 
+            if not nat:
+                table_routes.append(network)
+
             nat_interface = route['nat_interface']
             if network == '0.0.0.0/0' or network == '::/0':
                 nat_interface = interface
@@ -670,6 +867,8 @@ class ServerInstance(object):
                 nat=nat,
                 nat_interface=nat_interface,
             )
+
+        self.table_routes = table_routes
 
         if self.vxlan:
             self.iptables.add_route(self.vxlan.vxlan_net)
@@ -777,6 +976,7 @@ class ServerInstance(object):
             include_hidden=True,
             include_server_links=True,
             include_default=True,
+            include_dns_routes=True,
         ):
             if route['virtual_network']:
                 continue
@@ -912,7 +1112,7 @@ class ServerInstance(object):
             logger.exception('Failed to start ovpn process', 'server',
                 server_id=self.server.id,
             )
-            self.server.output.push_output(traceback.format_exc())
+            self.server.output.push_message(traceback.format_exc())
             raise
 
     def interrupter_sleep(self, length):
@@ -970,11 +1170,13 @@ class ServerInstance(object):
             yield
 
     def openvpn_output(self):
-        thread = threading.Thread(target=self._openvpn_stdout)
+        thread = threading.Thread(name="InstanceOvpnStdout",
+            target=self._openvpn_stdout)
         thread.daemon = True
         thread.start()
 
-        thread = threading.Thread(target=self._openvpn_stderr)
+        thread = threading.Thread(name="InstanceOvpnStderr",
+            target=self._openvpn_stderr)
         thread.daemon = True
         thread.start()
 
@@ -1022,17 +1224,17 @@ class ServerInstance(object):
 
             while not self.startup_interrupt:
                 try:
-                    doc = self.collection.find_and_modify({
+                    doc = self.collection.find_one_and_update({
                         '_id': self.server.id,
                         'availability_group': \
                             settings.local.host.availability_group,
                         'instances.instance_id': self.id,
                     }, {'$set': {
                         'instances.$.ping_timestamp': utils.now(),
-                    }}, fields={
+                    }}, {
                         '_id': False,
                         'instances': True,
-                    }, new=True)
+                    }, return_document=True)
 
                     yield
 
@@ -1095,17 +1297,17 @@ class ServerInstance(object):
                     continue
 
                 try:
-                    doc = self.collection.find_and_modify({
+                    doc = self.collection.find_one_and_update({
                         '_id': self.server.id,
                         'availability_group': \
                             settings.local.host.availability_group,
                         'instances.instance_id': self.id,
                     }, {'$set': {
                         'instances.$.ping_timestamp': utils.now(),
-                    }}, fields={
+                    }}, {
                         '_id': False,
                         'instances': True,
-                    }, new=True)
+                    }, return_document=True)
 
                     yield
 
@@ -1201,6 +1403,7 @@ class ServerInstance(object):
             pass
 
     def init_route_advertisements(self):
+        advertise_networks = []
         for route in self.server.get_routes(include_server_links=True):
             advertise = route['advertise']
             vpc_region = route['vpc_region']
@@ -1215,67 +1418,106 @@ class ServerInstance(object):
                 network = netmap
 
             if advertise or (vpc_region and vpc_id):
-                self.reserve_route_advertisement(
-                    vpc_region, vpc_id, network)
+                advertise_networks.append(network)
+
+        if advertise_networks:
+            self.reserve_route_advertisement(
+                vpc_region, vpc_id, advertise_networks, initial_load=True)
 
     def clear_route_advertisements(self):
         for ra_id in self.route_advertisements.copy():
-            self.routes_collection.remove({
+            self.routes_collection.delete_one({
                 '_id': ra_id,
+                'instance_id': self.id,
             })
 
-    def reserve_route_advertisement(self, vpc_region, vpc_id, network):
+    def reserve_route_advertisement(self, vpc_region, vpc_id, networks,
+            initial_load=False):
         cloud_provider = settings.app.cloud_provider
         if not cloud_provider:
             return
 
-        ra_id = '%s_%s_%s' % (self.server.id, vpc_id, network)
         timestamp_spec = utils.now() - datetime.timedelta(
             seconds=settings.vpn.route_ping_ttl)
 
         try:
             self.routes_collection.update_one({
-                '_id': ra_id,
+                '_id': self.server.id,
                 'timestamp': {'$lt': timestamp_spec},
             }, {'$set': {
                 'instance_id': self.id,
                 'server_id': self.server.id,
                 'vpc_region': vpc_region,
                 'vpc_id': vpc_id,
-                'network': network,
+                'networks': networks,
+                'vxlan_addr': self.vxlan.vxlan_addr,
+                'vxlan_addr6': self.vxlan.vxlan_addr6,
                 'timestamp': utils.now(),
             }}, upsert=True)
 
-            if cloud_provider == 'aws':
-                utils.add_vpc_route(network)
-            elif cloud_provider == 'oracle':
-                utils.oracle_add_route(network)
-            else:
-                logger.error('Unknown cloud provider type', 'server',
-                    cloud_provider=settings.app.cloud_provider,
-                    network=network,
-                )
+            for network in networks:
+                if cloud_provider == 'aws':
+                    utils.add_vpc_route(network)
+                elif cloud_provider == 'oracle':
+                    utils.oracle_add_route(network)
+                elif cloud_provider == 'pritunl':
+                    utils.pritunl_cloud_add_route(network)
+                else:
+                    logger.error('Unknown cloud provider type', 'server',
+                        cloud_provider=settings.app.cloud_provider,
+                        network=network,
+                    )
 
             if self.vxlan:
-                if network == self.server.network:
-                    vxlan_net = self.vxlan.vxlan_net
-                    if cloud_provider == 'aws':
-                        utils.add_vpc_route(vxlan_net)
-                    elif cloud_provider == 'oracle':
-                        utils.oracle_add_route(vxlan_net)
+                for network in networks:
+                    if network == self.server.network:
+                        vxlan_net = self.vxlan.vxlan_net
+                        if cloud_provider == 'aws':
+                            utils.add_vpc_route(vxlan_net)
+                        elif cloud_provider == 'oracle':
+                            utils.oracle_add_route(vxlan_net)
+                        elif cloud_provider == 'pritunl':
+                            utils.pritunl_cloud_add_route(vxlan_net)
 
-                elif network == self.server.network6:
-                    vxlan_net6 = utils.net4to6x64(
-                        settings.vpn.ipv6_prefix,
-                        self.vxlan.vxlan_net,
-                    )
-                    if cloud_provider == 'aws':
-                        utils.add_vpc_route(vxlan_net6)
-                    elif cloud_provider == 'oracle':
-                        utils.oracle_add_route(vxlan_net6)
+                    elif network == self.server.network6:
+                        vxlan_net6 = utils.net4to6x64(
+                            settings.vpn.ipv6_prefix,
+                            self.vxlan.vxlan_net,
+                        )
+                        if cloud_provider == 'aws':
+                            utils.add_vpc_route(vxlan_net6)
+                        elif cloud_provider == 'oracle':
+                            utils.oracle_add_route(vxlan_net6)
+                        elif cloud_provider == 'pritunl':
+                            utils.pritunl_cloud_add_route(vxlan_net6)
 
-            self.route_advertisements.add(ra_id)
+            self.tables_clear(networks=networks)
+
+            logger.info('Advertising routes', 'server',
+                server_id=self.server.id,
+                instance_id=self.id,
+                cloud_provider=cloud_provider,
+                networks=networks,
+            )
+
+            messenger.publish('instance', ['route_advertised',
+                self.server.id, self.vxlan.vxlan_addr,
+                self.vxlan.vxlan_addr6, networks])
+
+            self.route_advertisements.add(self.server.id)
         except pymongo.errors.DuplicateKeyError:
+            if initial_load:
+                doc = self.routes_collection.find_one({
+                    '_id': self.server.id,
+                })
+
+                if doc:
+                    vxlan_addr = doc['vxlan_addr']
+                    vxlan_addr6 = doc['vxlan_addr6']
+                    doc_networks = doc['networks']
+                    for network in doc_networks:
+                        self.tables_add(vxlan_addr, vxlan_addr6, network)
+
             return
         except:
             logger.exception('Failed to add vpc route', 'server',
@@ -1457,7 +1699,8 @@ class ServerInstance(object):
             )
             raise
 
-    def disconnect_wg(self, wg_public_key):
+    def disconnect_wg(self, wg_public_key, reason=""):
+        self.server.output.push_message('wg-client-kill "%s"' % reason)
         for i in range(10):
             try:
                 utils.check_output_logged([
@@ -1485,15 +1728,18 @@ class ServerInstance(object):
         self.instance_com.clients.disconnected(wg_public_key)
 
     def start_threads(self, cursor_id):
-        thread = threading.Thread(target=self._sub_thread, args=(cursor_id,))
+        thread = threading.Thread(name="InstanceSub",
+            target=self._sub_thread, args=(cursor_id,))
         thread.daemon = True
         thread.start()
 
-        thread = threading.Thread(target=self._keep_alive_thread)
+        thread = threading.Thread(name="InstanceKeepAlive",
+            target=self._keep_alive_thread)
         thread.daemon = True
         thread.start()
 
-        thread = threading.Thread(target=self._route_ad_keep_alive_thread)
+        thread = threading.Thread(name="InstanceRouteKeepAlive",
+            target=self._route_ad_keep_alive_thread)
         thread.daemon = True
         thread.start()
 
@@ -1508,7 +1754,11 @@ class ServerInstance(object):
             route_count=len(self.server.routes),
             network=self.server.network,
             network6=self.server.network6,
+            ovpn_dco=self.server.ovpn_dco,
             dynamic_firewall=self.server.dynamic_firewall,
+            bypass_sso_auth=self.server.bypass_sso_auth,
+            geo_sort=self.server.geo_sort,
+            force_connect=self.server.force_connect,
             sso_auth=self.server.sso_auth,
             route_dns=self.server.route_dns,
             device_auth=self.server.device_auth,
@@ -1539,10 +1789,13 @@ class ServerInstance(object):
             self.stop_process()
 
         startup_keepalive_thread = threading.Thread(
+            name="InstanceStartupKeepAlive",
             target=self._startup_keepalive_thread)
         startup_keepalive_thread.daemon = True
 
         self.state = 'init'
+        if self.server.debug:
+            self.server.output.push_message('State: ' + self.state)
         timer = threading.Timer(settings.vpn.startup_timeout, timeout)
         timer.daemon = True
         timer.start()
@@ -1556,18 +1809,34 @@ class ServerInstance(object):
                 return
 
             self.state = 'temp_path'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             os.makedirs(self._temp_path)
 
             if self.is_interrupted():
                 return
 
             self.state = 'ip_forwarding'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.enable_ip_forwarding()
 
             if self.is_interrupted():
                 return
 
+            if self.server.ovpn_dco:
+                self.state = 'ovpn_dco'
+                try:
+                    utils.check_output_logged([
+                        'modprobe',
+                        'ovpn-dco-v2',
+                    ])
+                except:
+                    pass
+
             self.state = 'bridge_start'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.bridge_start()
 
             if self.is_interrupted():
@@ -1576,6 +1845,8 @@ class ServerInstance(object):
             if self.server.replicating and self.server.vxlan:
                 try:
                     self.state = 'get_vxlan'
+                    if self.server.debug:
+                        self.server.output.push_message('State: ' + self.state)
                     self.vxlan = vxlan.get_vxlan(self.server.id, self.id,
                         self.server.ipv6)
 
@@ -1583,6 +1854,8 @@ class ServerInstance(object):
                         return
 
                     self.state = 'start_vxlan'
+                    if self.server.debug:
+                        self.server.output.push_message('State: ' + self.state)
                     self.vxlan.start()
 
                     if self.is_interrupted():
@@ -1594,38 +1867,57 @@ class ServerInstance(object):
                     )
 
             self.state = 'generate_ovpn_conf'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.generate_ovpn_conf()
 
             if self.is_interrupted():
                 return
 
             self.state = 'generate_iptables_rules'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.generate_iptables_rules()
 
             if self.server.wg:
                 self.state = 'generate_iptables_rules_wg'
+                if self.server.debug:
+                    self.server.output.push_message('State: ' + self.state)
                 self.generate_iptables_rules_wg()
 
             if self.is_interrupted():
                 return
 
             self.state = 'publish'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.publish('started')
 
             if self.is_interrupted():
                 return
 
             self.state = 'startup_keepalive'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             startup_keepalive_thread.start()
 
             if self.is_interrupted():
                 return
 
+            self.state = 'clear_table_rules'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
+            self.tables_clear()
+
             self.state = 'upsert_iptables_rules'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.iptables.upsert_rules()
 
             if self.server.wg:
                 self.state = 'upsert_iptables_rules_wg'
+                if self.server.debug:
+                    self.server.output.push_message('State: ' + self.state)
                 self.iptables_wg.upsert_rules()
 
             if self.is_interrupted():
@@ -1633,6 +1925,8 @@ class ServerInstance(object):
 
             if self.server.dynamic_firewall:
                 self.state = 'dyanmic_firewall'
+                if self.server.debug:
+                    self.server.output.push_message('State: ' + self.state)
                 firewall.open_server(self.server.id, self.id,
                     self.server.port, self.server.protocol,
                     self.server.port_wg if self.server.wg else 0)
@@ -1641,19 +1935,26 @@ class ServerInstance(object):
                     return
 
             self.state = 'init_route_advertisements'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.init_route_advertisements()
 
             if self.is_interrupted():
                 return
 
             self.state = 'openvpn_start'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.process = self.openvpn_start()
             self.start_threads(cursor_id)
+            self.openvpn_output()
 
             if self.is_interrupted():
                 return
 
             self.state = 'instance_com_start'
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
             self.instance_com = ServerInstanceCom(self.server, self)
             self.instance_com.start()
 
@@ -1662,6 +1963,8 @@ class ServerInstance(object):
 
             if send_events:
                 self.state = 'events'
+                if self.server.debug:
+                    self.server.output.push_message('State: ' + self.state)
                 event.Event(type=SERVERS_UPDATED)
                 event.Event(type=SERVER_HOSTS_UPDATED,
                     resource_id=self.server.id)
@@ -1678,6 +1981,8 @@ class ServerInstance(object):
                         continue
 
                     self.state = 'instance_link'
+                    if self.server.debug:
+                        self.server.output.push_message('State: ' + self.state)
                     instance_link = ServerInstanceLink(
                         server=self.server,
                         linked_server=linked_server,
@@ -1690,10 +1995,15 @@ class ServerInstance(object):
 
             if self.server.wg:
                 self.state = 'start_wg'
+                if self.server.debug:
+                    self.server.output.push_message('State: ' + self.state)
                 self.start_wg()
 
             self.state = 'running'
-            self.openvpn_output()
+            if self.server.debug:
+                self.server.output.push_message('State: ' + self.state)
+
+            self.bridge_up()
 
             if self.is_interrupted():
                 return
@@ -1709,8 +2019,8 @@ class ServerInstance(object):
                 server_name=self.server.name,
                 wg=self.server.wg,
                 port=self.server.port,
-                protocol=self.server.protocol,
                 port_wg=self.server.port_wg,
+                protocol=self.server.protocol,
                 ipv6=self.server.ipv6,
                 ipv6_firewall=self.server.ipv6_firewall,
                 network=self.server.network,
@@ -1733,19 +2043,18 @@ class ServerInstance(object):
                 inter_client=self.server.inter_client,
                 ping_interval=self.server.ping_interval,
                 ping_timeout=self.server.ping_timeout,
+                ping_interval_wg=self.server.ping_interval_wg,
+                ping_timeout_wg=self.server.ping_timeout_wg,
                 link_ping_interval=self.server.link_ping_interval,
                 link_ping_timeout=self.server.link_ping_timeout,
-                allowed_devices=self.server.allowed_devices,
                 max_clients=self.server.max_clients,
                 replica_count=self.server.replica_count,
                 dns_mapping=self.server.dns_mapping,
                 debug=self.server.debug,
                 interface=self.interface,
-                bridge_interface=self.bridge_interface,
                 interface_wg=self.interface_wg,
+                bridge_interface=self.bridge_interface,
                 vxlan=self.vxlan,
-                mss_fix=self.server.mss_fix,
-                multihome=self.server.multihome,
             )
             try:
                 while True:
@@ -1753,7 +2062,7 @@ class ServerInstance(object):
                         break
                     if self.is_interrupted():
                         self.stop_process()
-                    time.sleep(0.05)
+                    time.sleep(0.2)
             finally:
                 plugins.caller(
                     'server_stop',
@@ -1763,8 +2072,8 @@ class ServerInstance(object):
                     server_name=self.server.name,
                     wg=self.server.wg,
                     port=self.server.port,
-                    protocol=self.server.protocol,
                     port_wg=self.server.port_wg,
+                    protocol=self.server.protocol,
                     ipv6=self.server.ipv6,
                     ipv6_firewall=self.server.ipv6_firewall,
                     network=self.server.network,
@@ -1787,19 +2096,18 @@ class ServerInstance(object):
                     inter_client=self.server.inter_client,
                     ping_interval=self.server.ping_interval,
                     ping_timeout=self.server.ping_timeout,
+                    ping_interval_wg=self.server.ping_interval_wg,
+                    ping_timeout_wg=self.server.ping_timeout_wg,
                     link_ping_interval=self.server.link_ping_interval,
                     link_ping_timeout=self.server.link_ping_timeout,
-                    allowed_devices=self.server.allowed_devices,
                     max_clients=self.server.max_clients,
                     replica_count=self.server.replica_count,
                     dns_mapping=self.server.dns_mapping,
                     debug=self.server.debug,
                     interface=self.interface,
-                    bridge_interface=self.bridge_interface,
                     interface_wg=self.interface_wg,
+                    bridge_interface=self.bridge_interface,
                     vxlan=self.vxlan,
-                    mss_fix=self.server.mss_fix,
-                    multihome=self.server.multihome,
                 )
 
             if not self.clean_exit:
@@ -1840,6 +2148,14 @@ class ServerInstance(object):
                 self.iptables.clear_rules()
             except:
                 logger.exception('Server iptables clean up error', 'server',
+                    server_id=self.server.id,
+                    instance_id=self.id,
+                )
+
+            try:
+                self.tables_clear()
+            except:
+                logger.exception('Server tables clean up error', 'server',
                     server_id=self.server.id,
                     instance_id=self.id,
                 )
@@ -1943,7 +2259,8 @@ class ServerInstance(object):
         if not bool(response.modified_count):
             return
 
-        threading.Thread(target=self._run_thread, args=(send_events,)).start()
+        threading.Thread(name="InstanceRun", target=self._run_thread,
+            args=(send_events,)).start()
 
 def get_instance(server_id):
     try:

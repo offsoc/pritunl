@@ -17,6 +17,7 @@ import sys
 import pymongo
 import hashlib
 import base64
+import hmac
 import re
 import queue
 import urllib.request, urllib.error, urllib.parse
@@ -279,6 +280,13 @@ def filter_str(in_str):
         return in_str
     return ''.join(x for x in in_str if x.isalnum() or x in NAME_SAFE_CHARS)
 
+def filter_base64(in_str):
+    if in_str is not None:
+        in_str = str(in_str)
+    if not in_str:
+        return in_str
+    return ''.join(x for x in in_str if x.isalnum() or x in BASE64_SAFE_CHARS)
+
 def filter_unicode(in_str):
     if not in_str:
         return in_str
@@ -290,6 +298,13 @@ def filter_str2(in_str):
     if not in_str:
         return in_str
     return ''.join(x for x in in_str if x.isalnum() or x in NAME_SAFE_CHARS2)
+
+def filter_path(in_str):
+    if in_str is not None:
+        in_str = str(in_str)
+    if not in_str:
+        return in_str
+    return ''.join(x for x in in_str if x.isalnum() or x in PATH_SAFE_CHARS)
 
 def generate_secret():
     return generate_secret_len(32)
@@ -356,9 +371,8 @@ def roundrobin(*iterables):
             nexts = itertools.cycle(itertools.islice(nexts, pending))
 
 def random_name():
-    return '%s-%s-%s' % (
-        random.choice(RANDOM_ONE),
-        random.choice(RANDOM_TWO),
+    return '%s-%s' % (
+        random.choice(RANDOM_ELEM),
         random.randint(1000, 9999),
     )
 
@@ -394,12 +408,7 @@ def stop_process(process):
     return terminated
 
 def const_compare(x, y):
-    if len(x) != len(y):
-        return False
-    result = 0
-    for x, y in zip(x.encode(), y.encode()):
-        result |= x ^ y
-    return result == 0
+    return hmac.compare_digest(x, y)
 
 def response(data=None, status_code=None):
     response = flask.Response(response=data,
@@ -532,6 +541,7 @@ def check_openvpn_ver():
             stdout=subprocess.PIPE)
         output, _ = process.communicate()
         output = output.decode().split()[1].strip()
+        output = output.split('_')[0]
 
         version = [int(x) for x in output.split('.')]
 

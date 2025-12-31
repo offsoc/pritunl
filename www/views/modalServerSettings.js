@@ -16,6 +16,7 @@ define([
     errorMsg: 'Failed to saving server, server error occurred.',
     enterOk: false,
     hasAdvanced: true,
+    hasWarning: false,
     events: function() {
       return _.extend({
         'change .dh-param-bits select': 'onDhParamBits',
@@ -29,6 +30,8 @@ define([
         'click .multi-device-toggle': 'onMultiDeviceSelect',
         'click .vxlan-toggle': 'onVxlanSelect',
         'click .dynamic-firewall-toggle': 'onDynamicFirewallSelect',
+        'click .geo-sort-toggle': 'onGeoSortSelect',
+        'click .force-connect-toggle': 'onForceConnectSelect',
         'click .route-dns-toggle': 'onRouteDnsSelect',
         'click .device-auth-toggle': 'onDeviceAuthSelect',
         'click .sso-auth-toggle': 'onSsoAuthSelect',
@@ -45,6 +48,7 @@ define([
       return this.template(this.model.toJSON());
     },
     postRender: function() {
+      this.hasWarning = false
       this.$('.groups input').select2({
         tags: [],
         tokenSeparators: [',', ' '],
@@ -68,6 +72,7 @@ define([
         this.setAlert('danger', 'Using DH Param Bits less then 2048 is ' +
           'not compatible with newer versions of OpenSSL.', '.dh-param-bits');
       } else {
+        this.hasWarning = false
         this.clearAlert();
       }
     },
@@ -278,6 +283,23 @@ define([
     onVxlanSelect: function() {
       this.setVxlanSelect(!this.getVxlanSelect());
     },
+    getHideOvpnSelect: function() {
+      return this.$('.hide-ovpn-toggle .selector').hasClass(
+        'selected');
+    },
+    setHideOvpnSelect: function(state) {
+      if (state) {
+        this.$('.hide-ovpn-toggle .selector').addClass('selected');
+        this.$('.hide-ovpn-toggle .selector-inner').show();
+      }
+      else {
+        this.$('.hide-ovpn-toggle .selector').removeClass('selected');
+        this.$('.hide-ovpn-toggle .selector-inner').hide();
+      }
+    },
+    onHideOvpnSelect: function() {
+      this.setHideOvpnSelect(!this.getHideOvpnSelect());
+    },
     getDynamicFirewallSelect: function() {
       return this.$('.dynamic-firewall-toggle .selector').hasClass(
         'selected');
@@ -294,6 +316,40 @@ define([
     },
     onDynamicFirewallSelect: function() {
       this.setDynamicFirewallSelect(!this.getDynamicFirewallSelect());
+    },
+    getGeoSortSelect: function() {
+      return this.$('.geo-sort-toggle .selector').hasClass(
+        'selected');
+    },
+    setGeoSortSelect: function(state) {
+      if (state) {
+        this.$('.geo-sort-toggle .selector').addClass('selected');
+        this.$('.geo-sort-toggle .selector-inner').show();
+      }
+      else {
+        this.$('.geo-sort-toggle .selector').removeClass('selected');
+        this.$('.geo-sort-toggle .selector-inner').hide();
+      }
+    },
+    onGeoSortSelect: function() {
+      this.setGeoSortSelect(!this.getGeoSortSelect());
+    },
+    getForceConnectSelect: function() {
+      return this.$('.force-connect-toggle .selector').hasClass(
+        'selected');
+    },
+    setForceConnectSelect: function(state) {
+      if (state) {
+        this.$('.force-connect-toggle .selector').addClass('selected');
+        this.$('.force-connect-toggle .selector-inner').show();
+      }
+      else {
+        this.$('.force-connect-toggle .selector').removeClass('selected');
+        this.$('.force-connect-toggle .selector-inner').hide();
+      }
+    },
+    onForceConnectSelect: function() {
+      this.setForceConnectSelect(!this.getForceConnectSelect());
     },
     getRouteDnsSelect: function() {
       return this.$('.route-dns-toggle .selector').hasClass(
@@ -405,11 +461,16 @@ define([
         networkMode !== this.model.get('network_mode') ||
         otpAuth !== this.model.get('otp_auth')
       ) {
-        this.setAlert('warning', 'These changes will require users ' +
-          'that are not using an official Pritunl client to download their ' +
-          'updated profile again before being able to connect. Users ' +
-          'using an official Pritunl client will be able sync the changes.');
+        if (!this.hasWarning) {
+          this.hasWarning = true
+          this.setAlert('warning', 'These changes will require users ' +
+            'that are not using an official Pritunl client to download ' +
+            'their updated profile again before being able to connect. ' +
+            'Users using an official Pritunl client will be able sync ' +
+            'the changes.');
+        }
       } else {
+        this.hasWarning = false
         this.clearAlert();
       }
     },
@@ -497,7 +558,10 @@ define([
       var portWg = parseInt(this.$('.port-wg input').val(), 10);
       var protocol = this.$('select.protocol').val();
       var dhParamBits = parseInt(this.$('.dh-param-bits select').val(), 10);
+      var hideOvpn = this.getHideOvpnSelect();
       var dynamicFirewall = this.getDynamicFirewallSelect();
+      var geoSort = this.getGeoSortSelect();
+      var forceConnect = this.getForceConnectSelect();
       var routeDns = this.getRouteDnsSelect();
       var deviceAuth = this.getDeviceAuthSelect();
       var ipv6 = this.getIpv6Select();
@@ -542,6 +606,8 @@ define([
         '.pre-connect-msg textarea').val().trim() || null;
       var mssFix =  parseInt(this.$('.mss-fix input').val(), 10) || null;
       var multihome = this.getMultihomeSelect();
+
+      this.hasWarning = false
 
       if (!name) {
         this.setAlert('danger', 'Name can not be empty.', '.name');
@@ -595,7 +661,10 @@ define([
         'network_end': networkEnd,
         'restrict_routes': restrictRoutes,
         'wg': wg,
+        'hide_ovpn': hideOvpn,
         'dynamic_firewall': dynamicFirewall,
+        'geo_sort': geoSort,
+        'force_connect': forceConnect,
         'route_dns': routeDns,
         'device_auth': deviceAuth,
         'ipv6': ipv6,

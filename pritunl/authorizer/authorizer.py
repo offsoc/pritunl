@@ -21,9 +21,9 @@ _states = tunldb.TunlDB()
 
 class Authorizer(object):
     def __init__(self, svr, usr, clients, mode, stage, remote_ip, platform,
-            device_id, device_name, mac_addr, mac_addrs, password,
-            auth_password, auth_token, auth_nonce, auth_timestamp, fw_token,
-            sso_token, reauth, callback):
+            client_ver, ovpn_ver, device_id, device_name, mac_addr, mac_addrs,
+            password, auth_password, auth_token, auth_nonce, auth_timestamp,
+            fw_token, sso_token, reauth, callback):
         self.server = svr
         self.user = usr
         self.clients = clients
@@ -31,6 +31,8 @@ class Authorizer(object):
         self.stage = stage
         self.remote_ip = remote_ip
         self.platform = platform
+        self.client_ver = client_ver
+        self.ovpn_ver = ovpn_ver
         self.device_id = device_id
         self.device_name = device_name
         self.mac_addr = mac_addr
@@ -130,6 +132,8 @@ class Authorizer(object):
         return {
             'remote_address': self.remote_ip,
             'platform': self.platform,
+            'client_version': self.client_ver,
+            'ovpn_version': self.ovpn_ver,
             'device_id': self.device_id,
             'device_name': self.device_name,
             'mac_addr': self.mac_addr,
@@ -264,7 +268,8 @@ class Authorizer(object):
         raise AuthError('Invalid device token')
 
     def _check_sso_token(self):
-        if not self.server.sso_auth or self.has_link:
+        if self.server.bypass_sso_auth or not self.server.sso_auth or \
+                self.has_link:
             return
 
         if self.has_token:
@@ -280,9 +285,9 @@ class Authorizer(object):
         if self.sso_token:
             tokens_collection = mongo.get_collection(
                 'server_sso_tokens')
-            doc = tokens_collection.find_and_modify(query={
+            doc = tokens_collection.find_one_and_delete({
                 '_id': self.sso_token,
-            }, remove=True)
+            })
             if doc and doc['user_id'] == self.user.id and \
                     doc['server_id'] == self.server.id and \
                     doc['stage'] == self.stage and \
@@ -327,7 +332,7 @@ class Authorizer(object):
                 factors=self.modes,
             )
 
-            self.sso_client_cache_collection.update_one({
+            self.sso_client_cache_collection.replace_one({
                 'user_id': self.user.id,
                 'server_id': self.server.id,
                 'device_id': self.device_id,
@@ -614,7 +619,7 @@ class Authorizer(object):
                     'User mac address %s not allowed' % self.mac_addr)
 
     def _check_password(self):
-        if settings.vpn.stress_test or self.user.link_server_id:
+        if self.user.link_server_id:
             return
 
         if BYPASS_SECONDARY in self.modes:
@@ -762,7 +767,7 @@ class Authorizer(object):
                     'passcode': passcode,
                 })
                 if doc:
-                    self.sso_passcode_cache_collection.update_one({
+                    self.sso_passcode_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'remote_ip': self.remote_ip,
@@ -859,7 +864,7 @@ class Authorizer(object):
                     raise AuthError('Invalid secondary passcode')
 
                 if settings.app.sso_cache and not self.server_auth_token:
-                    self.sso_passcode_cache_collection.update_one({
+                    self.sso_passcode_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'mac_addr': self.mac_addr,
@@ -920,7 +925,7 @@ class Authorizer(object):
                     'passcode': yubikey_hash,
                 })
                 if doc:
-                    self.sso_passcode_cache_collection.update_one({
+                    self.sso_passcode_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'remote_ip': self.remote_ip,
@@ -989,7 +994,7 @@ class Authorizer(object):
                     raise AuthError('Invalid YubiKey')
 
                 if settings.app.sso_cache and not self.server_auth_token:
-                    self.sso_passcode_cache_collection.update_one({
+                    self.sso_passcode_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'mac_addr': self.mac_addr,
@@ -1046,7 +1051,7 @@ class Authorizer(object):
                     'passcode': otp_code,
                 })
                 if doc:
-                    self.otp_cache_collection.update_one({
+                    self.otp_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'remote_ip': self.remote_ip,
@@ -1113,7 +1118,7 @@ class Authorizer(object):
                     reuse_otp_code = otp_code
 
                 if settings.app.sso_cache and not self.server_auth_token:
-                    self.otp_cache_collection.update_one({
+                    self.otp_cache_collection.replace_one({
                         'user_id': self.user.id,
                         'server_id': self.server.id,
                         'mac_addr': self.mac_addr,
@@ -1172,11 +1177,18 @@ class Authorizer(object):
                 raise AuthError('Invalid pin')
 
     def _check_sso(self):
-        if self.user.bypass_secondary or settings.vpn.stress_test:
+        if self.user.bypass_secondary:
             return
 
-        if not self.user.sso_auth_check(
-                self.server, self.password, self.remote_ip, self.has_token):
+        if self.server.bypass_sso_auth:
+            logger.info('Bypass sso auth enabled, skipping sso', 'sso',
+                user_name=self.user.name,
+                org_name=self.user.org.name,
+                server_name=self.server.name,
+            )
+        elif not self.user.sso_auth_check(
+                self.server, self.password, self.remote_ip,
+                self.has_fw_token or self.has_sso_token):
             self.user.audit_event('user_connection',
                 ('User connection to "%s" denied. ' +
                  'Single sign-on authentication failed') % (
@@ -1214,7 +1226,12 @@ class Authorizer(object):
         if not self.push_type:
             return
 
-        if settings.vpn.stress_test:
+        if self.server.bypass_sso_auth:
+            logger.info('Bypass sso auth enabled, skipping push', 'sso',
+                user_name=self.user.name,
+                org_name=self.user.org.name,
+                server_name=self.server.name,
+            )
             return
 
         if BYPASS_SECONDARY in self.modes:
@@ -1298,7 +1315,7 @@ class Authorizer(object):
                 'device_name': self.device_name,
             })
             if doc:
-                self.sso_push_cache_collection.update_one({
+                self.sso_push_cache_collection.replace_one({
                     'user_id': self.user.id,
                     'server_id': self.server.id,
                     'mac_addr': self.mac_addr,
@@ -1338,7 +1355,7 @@ class Authorizer(object):
             except:
                 pass
 
-        thread = threading.Thread(target=thread_func)
+        thread = threading.Thread(name="AuthorizerPush", target=thread_func)
         thread.daemon = True
         thread.start()
 
@@ -1408,7 +1425,7 @@ class Authorizer(object):
             raise AuthError('User failed push authentication')
 
         if settings.app.sso_cache and not self.server_auth_token:
-            self.sso_push_cache_collection.update_one({
+            self.sso_push_cache_collection.replace_one({
                 'user_id': self.user.id,
                 'server_id': self.server.id,
                 'mac_addr': self.mac_addr,
@@ -1441,6 +1458,8 @@ class Authorizer(object):
                 mac_addr=self.mac_addr,
                 mac_addrs=self.mac_addrs,
                 platform=self.platform,
+                client_ver=self.client_ver,
+                ovpn_ver=self.ovpn_ver,
                 device_id=self.device_id,
                 device_name=self.device_name,
                 bypass_secondary=self.user.bypass_secondary,

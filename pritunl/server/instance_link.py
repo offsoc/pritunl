@@ -40,7 +40,12 @@ class ServerInstanceLink(object):
         self.interface = utils.interface_acquire(
             self.linked_server.adapter_type)
 
-        remotes = self.linked_server.get_key_remotes(True)
+        remotes, _ = self.linked_server.get_key_remotes(True)
+
+        if self.linked_server.ovpn_dco:
+            ciphers = CIPHERS_DCO
+        else:
+            ciphers = CIPHERS
 
         client_conf = OVPN_INLINE_LINK_CONF % (
             uuid.uuid4().hex,
@@ -48,7 +53,7 @@ class ServerInstanceLink(object):
             self.interface,
             self.linked_server.adapter_type,
             remotes,
-            CIPHERS[self.linked_server.cipher],
+            ciphers[self.linked_server.cipher],
             HASHES[self.linked_server.hash],
             4 if self.server.debug else 1,
             8 if self.server.debug else 3,
@@ -57,8 +62,12 @@ class ServerInstanceLink(object):
             settings.vpn.server_poll_timeout,
         )
 
-        if self.linked_server.lzo_compression != ADAPTIVE:
+        if self.linked_server.lzo_compression != ADAPTIVE and \
+                not self.linked_server.ovpn_dco:
             client_conf += 'comp-lzo no\n'
+
+        if self.linked_server.tun_mtu:
+            client_conf += 'tun-mtu %s\n' % svr.tun_mtu
 
         if self.server.debug:
             self.server.output_link.push_message(
@@ -74,7 +83,6 @@ class ServerInstanceLink(object):
                         link_server_id=self.linked_server.id,
                     )
 
-        client_conf += JUMBO_FRAMES[self.linked_server.jumbo_frames]
         client_conf += '<ca>\n%s\n</ca>\n' % self.linked_server.ca_certificate
 
         if self.linked_server.tls_auth:
@@ -101,7 +109,7 @@ class ServerInstanceLink(object):
             'links.$.user_id': self.user.id,
         }})
 
-        if not bool(response.modified_count):
+        if not bool(response.matched_count):
             raise ServerLinkError('Failed to update server links')
 
         self.user.link_server_id = self.server.id
@@ -195,9 +203,11 @@ class ServerInstanceLink(object):
     def start(self):
         self.openvpn_start()
 
-        thread = threading.Thread(target=self.openvpn_watch)
+        thread = threading.Thread(name="OvpnLinkWatch",
+            target=self.openvpn_watch)
         thread.start()
-        thread = threading.Thread(target=self.stop_watch)
+        thread = threading.Thread(name="OvpnLinkStopWatch",
+            target=self.stop_watch)
         thread.start()
 
     def stop(self):

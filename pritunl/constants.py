@@ -95,6 +95,7 @@ AWS_REGIONS = {
     'ap-northeast-2',
     'ap-southeast-1',
     'ap-southeast-2',
+    'ap-southeast-3',
     'ap-east-1',
     'ap-south-1',
     'sa-east-1',
@@ -105,13 +106,19 @@ DISABLED = 'disabled'
 
 NAME_SAFE_CHARS = {
     '-', '=', '_', '@', '.', ':', '/',
-    '!', '#', '$', '%', '&', '*', '+',
-    '?', '^', '`', '{', '|', '}', '~',
+    '!', '#', '$', '&', '*', '+',
+    '?', '^', '|', '~',
 }
 
 NAME_SAFE_CHARS2 = {
     '-', '_',
 }
+
+PATH_SAFE_CHARS = {
+    '-', '_', '.', '/',
+}
+
+BASE64_SAFE_CHARS = {'+', '/', '='}
 
 VALID_CHARS = {
     'a', 'b', 'c', 'd', 'e', 'f', 'g',
@@ -658,7 +665,7 @@ serial = %s
 new_certs_dir = %s
 certificate = %s
 private_key = %s
-default_days = 7300
+default_days = %d
 default_crl_days = 365
 default_md = %s
 policy = ca_policy
@@ -835,6 +842,18 @@ NETWORK_WG_IN_USE_MSG = 'Network WG address is already in use.'
 PORT_PROTOCOL_IN_USE = 'port_protocol_in_use'
 PORT_PROTOCOL_IN_USE_MSG = 'Port and protocol is already in use.'
 
+BYPASS_SSO_DEVICE_AUTH = 'bypass_sso_device_auth'
+BYPASS_SSO_DEVICE_AUTH_MSG = 'Bypass single sign-on requires ' \
+    'device authentication.'
+
+PING_INTERVAL_TOO_HIGH = 'ping_interval_too_high'
+PING_INTERVAL_TOO_HIGH_MSG = 'Ping interval must be at ' \
+    'least 5 seconds shorter than ping timeout.'
+
+PING_INTERVAL_WG_TOO_HIGH = 'ping_interval_wg_too_high'
+PING_INTERVAL_WG_TOO_HIGH_MSG = 'WireGuard ping interval must be at ' \
+    'least 5 seconds shorter than WireGuard ping timeout.'
+
 PORT_WG_IN_USE = 'port_wg_protocol_in_use'
 PORT_WG_IN_USE_MSG = 'WG Port is already in use.'
 
@@ -1001,35 +1020,19 @@ DEVICE_REGISTRATION_LIMIT = 'device_registration_limit'
 DEVICE_REGISTRATION_LIMIT_MSG = 'Too many invalid device registration ' \
     'attempts, device removed.'
 
-RANDOM_ONE = (
-    'snowy',
-    'restless',
-    'calm',
-    'ancient',
-    'summer',
-    'evening',
-    'guarded',
-    'lively',
-    'thawing',
-    'autumn',
-    'thriving',
-    'patient',
-    'winter',
-)
-RANDOM_TWO = (
-    'waterfall',
-    'meadow',
-    'skies',
-    'waves',
-    'fields',
-    'stars',
-    'dreams',
-    'refuge',
-    'forest',
-    'plains',
-    'waters',
-    'plateau',
-    'thunder',
+RANDOM_ELEM = (
+    'copper',
+    'argon',
+    'xenon',
+    'radon',
+    'cobalt',
+    'nickel',
+    'carbon',
+    'helium',
+    'nitrogen',
+    'radium',
+    'lithium',
+    'silicon',
 )
 
 CIPHERS = {
@@ -1039,6 +1042,15 @@ CIPHERS = {
     'aes128': 'cipher AES-128-CBC\ndata-ciphers AES-128-GCM:AES-128-CBC',
     'aes192': 'cipher AES-256-CBC\ndata-ciphers AES-256-GCM:AES-256-CBC',
     'aes256': 'cipher AES-256-CBC\ndata-ciphers AES-256-GCM:AES-256-CBC',
+    'chacha20poly1205': 'cipher CHACHA20-POLY1305\ndata-ciphers CHACHA20-POLY1305',
+}
+CIPHERS_DCO = {
+    'none': 'cipher none',
+    'bf128': 'cipher AES-128-GCM\ndata-ciphers AES-128-GCM',
+    'bf256': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
+    'aes128': 'cipher AES-128-GCM\ndata-ciphers AES-128-GCM',
+    'aes192': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
+    'aes256': 'cipher AES-256-GCM\ndata-ciphers AES-256-GCM',
     'chacha20poly1205': 'cipher CHACHA20-POLY1305\ndata-ciphers CHACHA20-POLY1305',
 }
 
@@ -1052,13 +1064,22 @@ SERVER_CIPHERS_OLD = {
     'chacha20poly1205': 'cipher CHACHA20-POLY1305',
 }
 SERVER_CIPHERS = {
-    'none': 'cipher none',
+    'none': 'cipher none\nncp-disable',
     'bf128': 'cipher AES-128-CBC\nncp-ciphers AES-128-GCM:AES-128-CBC',
     'bf256': 'cipher AES-256-CBC\nncp-ciphers AES-256-GCM:AES-256-CBC',
     'aes128': 'cipher AES-128-CBC\nncp-ciphers AES-128-GCM:AES-128-CBC',
     'aes192': 'cipher AES-256-CBC\nncp-ciphers AES-256-GCM:AES-256-CBC',
     'aes256': 'cipher AES-256-CBC\nncp-ciphers AES-256-GCM:AES-256-CBC',
     'chacha20poly1205': 'cipher CHACHA20-POLY1305\nncp-ciphers CHACHA20-POLY1305',
+}
+SERVER_CIPHERS_DCO = {
+    'none': 'cipher none\nncp-disable',
+    'bf128': 'cipher AES-128-GCM',
+    'bf256': 'cipher AES-256-GCM',
+    'aes128': 'cipher AES-128-GCM',
+    'aes192': 'cipher AES-256-GCM',
+    'aes256': 'cipher AES-256-GCM',
+    'chacha20poly1205': 'cipher CHACHA20-POLY1305',
 }
 
 HASHES = {
@@ -1076,11 +1097,6 @@ ONC_CIPHERS = {
     'aes128': 'AES-128-CBC',
     'aes192': 'AES-256-CBC',
     'aes256': 'AES-256-CBC',
-}
-
-JUMBO_FRAMES = {
-    False: '',
-    True: 'tun-mtu 9000\nfragment 0\nmssfix 0\n',
 }
 
 OVPN_INLINE_SERVER_CONF_OLD = """\
@@ -1112,6 +1128,7 @@ mute %s
 
 OVPN_INLINE_SERVER_CONF = """\
 ignore-unknown-option ncp-ciphers
+ignore-unknown-option ncp-disable
 port %s
 proto %s
 dev %s
@@ -1240,9 +1257,10 @@ OVPN_ONC_CLIENT_CERT = """\
     }"""
 
 OVPN_INLINE_LINK_CONF = """\
-client
+ignore-unknown-option data-ciphers
 setenv UV_ID %s
 setenv UV_NAME %s
+client
 dev %s
 dev-type %s
 %s
@@ -1361,4 +1379,6 @@ BIND_PORT=%s
 INTERNAL_ADDRESS=%s
 SSL_CERT=%s
 SSL_KEY=%s
+WEB_STRICT=%s
+WEB_SECRET=%s
 """

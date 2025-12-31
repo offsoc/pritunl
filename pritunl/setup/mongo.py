@@ -10,6 +10,9 @@ import pymongo
 import pymongo.helpers
 import time
 import collections
+import base64
+import nacl.secret
+import nacl.utils
 
 def _get_read_pref(name):
     return {
@@ -87,7 +90,11 @@ def upsert_indexes():
     if prefix + 'messages' not in cur_collections:
         mongo.secondary_database.create_collection(
             prefix + 'messages', capped=True,
-            size=5000192, max=1000)
+            size=20971520, max=5000)
+        mongo.get_collection('messages').insert_one({
+            'message': None,
+            'timestamp': utils.now(),
+        })
 
     upsert_index('logs', 'timestamp', background=True)
     upsert_index('transaction', 'lock_id',
@@ -449,12 +456,16 @@ def setup_mongo():
     if prefix + 'messages' not in cur_collections:
         mongo.secondary_database.create_collection(
             prefix + 'messages', capped=True,
-            size=5000192, max=1000)
+            size=20971520, max=5000)
     elif not mongo.get_collection('messages').options().get('capped'):
         mongo.get_collection('messages').drop()
         mongo.secondary_database.create_collection(
             prefix + 'messages', capped=True,
-            size=5000192, max=1000)
+            size=20971520, max=5000)
+        mongo.get_collection('messages').insert_one({
+            'message': None,
+            'timestamp': utils.now(),
+        })
 
     settings.local.mongo_time = None
 
@@ -479,6 +490,7 @@ def setup_mongo():
 
     secret_key = settings.app.cookie_secret
     secret_key2 = settings.app.cookie_secret2
+    cookie_web_secret = settings.app.cookie_web_secret
     settings_commit = False
 
     if not secret_key:
@@ -490,7 +502,14 @@ def setup_mongo():
         settings_commit = True
         settings.app.cookie_secret2 = utils.rand_str(64)
 
+    if not cookie_web_secret:
+        settings_commit = True
+        web_key = nacl.utils.random(nacl.secret.SecretBox.KEY_SIZE)
+        cookie_web_secret = base64.b64encode(bytes(web_key)).decode()
+        settings.app.cookie_web_secret = cookie_web_secret
+
     if settings_commit:
         settings.commit()
 
     app.app.secret_key = secret_key.encode()
+    settings.local.web_secret = base64.b64decode(cookie_web_secret)

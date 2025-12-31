@@ -2,12 +2,13 @@ from pritunl.helpers import *
 from pritunl import mongo
 from pritunl import cache
 from pritunl import utils
+from pritunl import settings
 from pritunl import database
 
 import pymongo
 import time
 
-def publish(channels, message, extra=None, transaction=None):
+def publish(channels, message, extra=None):
     if cache.has_cache:
         return cache.publish(channels, message, extra=extra)
 
@@ -21,44 +22,16 @@ def publish(channels, message, extra=None, transaction=None):
         for key, val in list(extra.items()):
             doc[key] = val
 
-    # ObjectId must be set by server and ObjectId order must match $natural
-    # order. Docs sent in order on client are not guaranteed to match $natural
-    # order on server. Nonce is added to force an insert from upsert where
-    # insert is not supported.
-    # When using inserts manipulate=False must be set to prevent pymongo
-    # from setting ObjectId locally.
-    if transaction:
-        tran_collection = transaction.collection(collection.name_str)
-
-        if isinstance(channels, str):
-            doc['channel'] = channels
-            tran_collection.update_one({
-                'nonce': database.ObjectId(),
-            }, {
-                '$set': doc,
-            }, upsert=True)
-        else:
-            for channel in channels:
-                doc_copy = doc.copy()
-                doc_copy['channel'] = channel
-
-                tran_collection.bulk().find({
-                    'nonce': database.ObjectId(),
-                }).upsert().update({
-                    '$set': doc_copy,
-                })
-            tran_collection.bulk_execute()
+    if isinstance(channels, str):
+        doc['channel'] = channels
+        collection.insert_one(doc)
     else:
-        if isinstance(channels, str):
-            doc['channel'] = channels
-            collection.insert_one(doc)
-        else:
-            docs = []
-            for channel in channels:
-                doc_copy = doc.copy()
-                doc_copy['channel'] = channel
-                docs.append(doc_copy)
-            collection.insert_many(docs)
+        docs = []
+        for channel in channels:
+            doc_copy = doc.copy()
+            doc_copy['channel'] = channel
+            docs.append(doc_copy)
+        collection.insert_many(docs, ordered=True)
 
 def get_cursor_id(channels):
     if cache.has_cache:
@@ -96,7 +69,9 @@ def subscribe(channels, cursor_id=None, timeout=None, yield_delay=None,
         return
 
     collection = mongo.get_collection('messages')
+    stall_ttl = settings.mongo.cursor_stall_ttl
     start_time = time.time()
+    cursor = None
     cursor_id = cursor_id or get_cursor_id(channels)
 
     while True:
@@ -109,10 +84,26 @@ def subscribe(channels, cursor_id=None, timeout=None, yield_delay=None,
                 spec['channel'] = {'$in': channels}
 
             if cursor_id:
-                spec['_id'] = {'$gt': cursor_id}
+                cursor_missing = collection.count_documents(
+                    {'_id': cursor_id},
+                    limit=1,
+                ) < 1
+                if cursor_missing:
+                    cursor_id = get_cursor_id(channels)
+
+                if cursor_id:
+                    spec['_id'] = {'$gt': cursor_id}
 
             yield
 
+            if cursor:
+                try:
+                    cursor.close()
+                    cursor = None
+                except:
+                    pass
+
+            last_event = time.time()
             cursor = collection.find(
                 spec,
                 cursor_type=pymongo.cursor.CursorType.TAILABLE_AWAIT,
@@ -122,6 +113,7 @@ def subscribe(channels, cursor_id=None, timeout=None, yield_delay=None,
 
             while cursor.alive:
                 for doc in cursor:
+                    last_event = time.time()
                     cursor_id = doc['_id']
 
                     yield
@@ -135,10 +127,10 @@ def subscribe(channels, cursor_id=None, timeout=None, yield_delay=None,
 
                         spec = spec.copy()
                         spec['_id'] = {'$gt': cursor_id}
-                        cursor = collection.find(spec).sort(
+                        batch_cursor = collection.find(spec).sort(
                             '$natural', pymongo.ASCENDING)
 
-                        for doc in cursor:
+                        for doc in batch_cursor:
                             if doc.get('message') is not None:
                                 doc.pop('nonce', None)
                                 yield doc
@@ -148,11 +140,26 @@ def subscribe(channels, cursor_id=None, timeout=None, yield_delay=None,
                 if yield_app_server and check_app_server_interrupt():
                     return
 
-                if timeout and time.time() - start_time >= timeout:
+                cur_time = time.time()
+                if timeout and cur_time - start_time >= timeout:
                     return
+
+                if cur_time - last_event > stall_ttl:
+                    break
 
                 time.sleep(0.2)
                 yield
 
         except pymongo.errors.AutoReconnect:
             time.sleep(0.2)
+
+        except pymongo.errors.CursorNotFound:
+            time.sleep(0.2)
+
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                    cursor = None
+                except:
+                    pass
